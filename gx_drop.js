@@ -15,13 +15,15 @@
  */
 (function (global) {
     "use strict";
-    if (global.__plsGxDropLoaded30) {
-        global.__plsGxDropVer = 30;
+    global.__plsGxDropLoaded30 = 1;
+    global.__plsGxDropLoaded29 = 1;
+    if (global.__plsGxDropLoaded31) {
+        global.__plsGxDropVer = 31;
         try { if (typeof global.i_gx_drop_boot === "function") global.i_gx_drop_boot(); } catch (e0) {}
         return;
     }
-    global.__plsGxDropLoaded30 = 1;
-    global.__plsGxDropVer = 30;
+    global.__plsGxDropLoaded31 = 1;
+    global.__plsGxDropVer = 31;
 
     var STATUS_IDLE = 0;
     var STATUS_HOVER = 1;
@@ -56,8 +58,10 @@
     var canvasFillReady = 0;
     var canvasFillApplying = 0;
     var canvasFillLast = "";
+    var canvasFillRaf = 0;
     var extractedList = [];
     var importedZipBytes = null;
+    var mediaUrlCache = {};
 
     function isLoopbackHost() {
         try {
@@ -84,6 +88,21 @@
         return !isLoopbackHost();
     }
 
+    function dropHeavyZipBytes() {
+        importedZipBytes = null;
+        if (state.bytes && state.bytes.length > 2 * 1024 * 1024) state.bytes = null;
+    }
+
+    function isMediaFileName(name) {
+        return /\.(mp4|m4v|webm|mov|mkv|ogv|mp3|ogg|oga|wav|flac|m4a|aac|png|jpe?g|webp|gif|bmp)$/i.test(String(name || ""));
+    }
+
+    function isChartTextName(name) {
+        var n = String(name || "").toLowerCase();
+        return n.indexOf(".json") >= 0 || n.slice(-4) === ".txt" || n.slice(-4) === ".xml"
+            || n.slice(-4) === ".pec" || n.slice(-4) === ".rpe" || n.indexOf("extra") >= 0;
+    }
+
     function persistFs(done) {
         var finished = 0;
         function finish() {
@@ -106,6 +125,17 @@
         });
         if (pending <= 0) finish();
         setTimeout(finish, 400);
+    }
+
+    function wipePersistedCharts() {
+        if (global.__plsWipedSavedCharts) return;
+        if (!getFS()) return;
+        global.__plsWipedSavedCharts = 1;
+        wipeFsPath("/_savedata/track");
+        wipeFsPath("/savedata/track");
+        wipeFsPath("/_savedata/charts");
+        wipeFsPath("/savedata/charts");
+        persistFs(function () {});
     }
 
     function wipeFsPath(raw) {
@@ -419,7 +449,6 @@
             if (canWrite) {
                 var roots = [destRoot];
                 if (destRoot !== "/tmp/pls/track") roots.push("/tmp/pls/track");
-                if (destRoot !== "/_savedata/track") roots.push("/_savedata/track");
                 var ri;
                 for (ri = 0; ri < roots.length; ri++) {
                     var outPath = roots[ri] + "/" + name;
@@ -437,9 +466,19 @@
         return wrote;
     }
 
+    function revokeMediaUrls() {
+        var keys = Object.keys(mediaUrlCache);
+        var i;
+        for (i = 0; i < keys.length; i++) {
+            try { URL.revokeObjectURL(mediaUrlCache[keys[i]]); } catch (e0) {}
+        }
+        mediaUrlCache = {};
+    }
+
     function clearExtracted() {
         extractedFiles = {};
         extractedList = [];
+        revokeMediaUrls();
     }
 
     function rememberImportedZip(bytes) {
@@ -455,6 +494,9 @@
 
     function storeExtracted(name, bytes) {
         if (!name || !bytes || !bytes.length) return;
+        if (isMediaFileName(name)) return;
+        if (bytes.length > 2 * 1024 * 1024) return;
+        if (!isChartTextName(name) && bytes.length > 256 * 1024) return;
         var rel = String(name).replace(/\\/g, "/");
         while (rel.charAt(0) === "/") rel = rel.slice(1);
         if (!rel) return;
@@ -495,6 +537,10 @@
         var dest = toStr(destRaw).replace(/\\/g, "/");
         while (dest.length > 1 && dest.charAt(dest.length - 1) === "/") dest = dest.slice(0, -1);
         var destLower = dest.toLowerCase();
+        if (destLower.indexOf("/_savedata") === 0 || destLower.indexOf("/savedata") === 0) {
+            dest = "/tmp/pls/track";
+            destLower = dest;
+        }
         var allowed = destLower.indexOf("/tmp/pls") === 0
             || destLower.indexOf("/_savedata/track") === 0
             || destLower.indexOf("/savedata/track") === 0
@@ -529,6 +575,7 @@
                 lastUnzipError = lastUnzipError || "unzip wrote 0 files";
                 return 0;
             }
+            dropHeavyZipBytes();
             try { console.log("[pls-gx] unzip ok n=" + lastUnzipCount + " dest=" + dest + " mem=" + extractedList.length); } catch (eLog) {}
             return lastUnzipCount;
         } catch (err) {
@@ -610,7 +657,7 @@
         }
         if (!bytes || !bytes.length) return 0;
         readFileBytes = bytes;
-        state.bytes = bytes;
+        if (bytes.length <= 2 * 1024 * 1024 && !isMediaFileName(src)) state.bytes = bytes;
         return bytes.length;
     }
 
@@ -860,7 +907,6 @@
         if (!bytes || !bytes.length) return "";
         var fs = getFS();
         var paths = [
-            "/_savedata/charts/" + name,
             "/tmp/pls/charts/" + name,
             "/tmp/charts/" + name
         ];
@@ -879,7 +925,7 @@
                 } catch (e2) {}
             }
         }
-        return written || ("/_savedata/charts/" + name);
+        return written || ("/tmp/pls/charts/" + name);
     }
 
     function takeFile(file) {
@@ -1189,19 +1235,17 @@
     }
 
     function fillGameCanvas() {
-        if (typeof document === "undefined") return;
+        if (typeof document === "undefined" || canvasFillApplying) return;
         var canvas = document.getElementById("canvas");
         if (!canvas) return;
         var vp = viewportCssSize();
-        var key = vp.w + "x" + vp.h + "@" + vp.x + "," + vp.y;
+        var key = Math.round(vp.w) + "x" + Math.round(vp.h) + "@" + Math.round(vp.x) + "," + Math.round(vp.y);
         try {
             window.startingWidth = vp.w;
             window.startingHeight = vp.h;
-            window.startingAspect = vp.w / vp.h;
+            window.startingAspect = vp.w / Math.max(1, vp.h);
         } catch (e0) {}
-        if (canvasFillLast === key && canvas.style.width === (vp.w + "px") && canvas.style.height === (vp.h + "px")) {
-            return;
-        }
+        if (canvasFillLast === key) return;
         canvasFillApplying = 1;
         try {
             canvasFillLast = key;
@@ -1223,49 +1267,36 @@
         }
     }
 
+    function scheduleFill() {
+        if (canvasFillRaf) return;
+        try {
+            canvasFillRaf = requestAnimationFrame(function () {
+                canvasFillRaf = 0;
+                fillGameCanvas();
+            });
+        } catch (e0) {
+            canvasFillRaf = 0;
+            fillGameCanvas();
+        }
+    }
+
     function installCanvasFill() {
-        if (canvasFillReady || typeof document === "undefined") return;
+        if (global.__plsCanvasFillReady || canvasFillReady || typeof document === "undefined") {
+            fillGameCanvas();
+            return;
+        }
         canvasFillReady = 1;
+        global.__plsCanvasFillReady = 1;
         window.ensureAspectRatio = function () {
             fillGameCanvas();
         };
-        var origSet = window.onGameSetWindowSize;
-        window.onGameSetWindowSize = function (width, height) {
-            if (typeof origSet === "function") {
-                try { origSet(width, height); } catch (e0) {}
-            }
-            fillGameCanvas();
-        };
-        try {
-            if (typeof MutationObserver === "function") {
-                var watch = function (el) {
-                    if (!el || el.__plsFillMo) return;
-                    el.__plsFillMo = 1;
-                    var mo = new MutationObserver(function () {
-                        if (!canvasFillApplying) fillGameCanvas();
-                    });
-                    mo.observe(el, { attributes: true, attributeFilter: ["style", "class"] });
-                };
-                var canvas = document.getElementById("canvas");
-                if (canvas) watch(canvas);
-                else {
-                    document.addEventListener("DOMContentLoaded", function () {
-                        watch(document.getElementById("canvas"));
-                        fillGameCanvas();
-                    });
-                }
-            }
-        } catch (e1) {}
         fillGameCanvas();
-        setTimeout(fillGameCanvas, 50);
-        setTimeout(fillGameCanvas, 250);
-        setTimeout(fillGameCanvas, 800);
+        setTimeout(fillGameCanvas, 120);
+        setTimeout(fillGameCanvas, 400);
     }
 
     function relayoutGame() {
         fillGameCanvas();
-        try { if (typeof ensureAspectRatio === "function") ensureAspectRatio(); } catch (e0) {}
-        try { window.dispatchEvent(new Event("resize")); } catch (e1) {}
     }
 
     function lockLandscape() {
@@ -1420,28 +1451,34 @@
     }
 
     function bindFsListeners() {
-        if (fsUiReady) return;
+        if (fsUiReady || global.__plsFsListeners) return;
         fsUiReady = 1;
+        global.__plsFsListeners = 1;
         document.addEventListener("fullscreenchange", function () {
-            if (!isPageFullscreen() && fsWanted && !fsPicking) syncFsChrome();
-            else {
-                relayoutGame();
-                syncFsChrome();
-            }
-        });
-        document.addEventListener("webkitfullscreenchange", function () {
-            relayoutGame();
+            scheduleFill();
             syncFsChrome();
         });
-        window.addEventListener("orientationchange", function () { setTimeout(function () { relayoutGame(); syncFsChrome(); }, 200); });
-        window.addEventListener("resize", function () { fillGameCanvas(); syncFsChrome(); });
+        document.addEventListener("webkitfullscreenchange", function () {
+            scheduleFill();
+            syncFsChrome();
+        });
+        window.addEventListener("orientationchange", function () {
+            setTimeout(function () { scheduleFill(); syncFsChrome(); }, 200);
+        });
+        window.addEventListener("resize", function () {
+            scheduleFill();
+            syncFsChrome();
+        });
         window.addEventListener("focus", function () { if (fsWanted) reenterFullscreenSoon(); });
         document.addEventListener("visibilitychange", function () {
             if (document.visibilityState === "visible" && fsWanted) reenterFullscreenSoon();
         });
         try {
             if (window.visualViewport) {
-                visualViewport.addEventListener("resize", function () { relayoutGame(); syncFsChrome(); });
+                visualViewport.addEventListener("resize", function () {
+                    scheduleFill();
+                    syncFsChrome();
+                });
             }
         } catch (e0) {}
     }
@@ -1453,19 +1490,38 @@
         bindFsListeners();
         installCanvasFill();
         if (!document.body) {
-            document.addEventListener("DOMContentLoaded", function () {
-                fillGameCanvas();
-                syncFsChrome();
-            });
+            document.addEventListener("DOMContentLoaded", syncFsChrome);
             return;
         }
-        fillGameCanvas();
         syncFsChrome();
+    }
+
+    function uninstallStaleCaches() {
+        if (global.__plsSwUnreg) return;
+        global.__plsSwUnreg = 1;
+        try {
+            if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) {
+                navigator.serviceWorker.getRegistrations().then(function (rs) {
+                    var i;
+                    for (i = 0; i < (rs || []).length; i++) rs[i].unregister();
+                });
+            }
+        } catch (e0) {}
+        try {
+            if (window.caches && caches.keys) {
+                caches.keys().then(function (keys) {
+                    var i;
+                    for (i = 0; i < (keys || []).length; i++) caches.delete(keys[i]);
+                });
+            }
+        } catch (e1) {}
     }
 
     function boot() {
         if (typeof document === "undefined") return 0;
+        uninstallStaleCaches();
         installFsUi();
+        wipePersistedCharts();
         hideOverlayFileInput();
         dropLayer();
         patchPause();
@@ -1787,23 +1843,28 @@
         return null;
     }
 
-    function blobUrlFromBytes(bytes, mime) {
+    function blobUrlFromBytes(bytes, mime, key) {
+        if (key && mediaUrlCache[key]) return mediaUrlCache[key];
         var blob = new Blob([bytes], { type: mime || "application/octet-stream" });
-        return URL.createObjectURL(blob);
+        var url = URL.createObjectURL(blob);
+        if (key) mediaUrlCache[key] = url;
+        return url;
     }
 
     function mediaSrc(path) {
         var p = toStr(path).replace(/\\/g, "/");
         if (!p) return "";
         if (p.indexOf("blob:") === 0 || p.indexOf("http://") === 0 || p.indexOf("https://") === 0 || p.indexOf("data:") === 0) return p;
+        if (mediaUrlCache[p]) return mediaUrlCache[p];
         var mem = lookupExtracted(p);
-        if (mem && mem.length) return blobUrlFromBytes(mem, mediaMime(p));
+        if (mem && mem.length) return blobUrlFromBytes(mem, mediaMime(p), p);
         var fs = getFS();
         if (fs && typeof fs.readFile === "function") {
             var tries = candidatePaths(p);
             for (var i = 0; i < tries.length; i++) {
+                if (mediaUrlCache[tries[i]]) return mediaUrlCache[tries[i]];
                 var bytes = lookupExtracted(tries[i]) || readFsBytes(fs, tries[i]);
-                if (bytes && bytes.length) return blobUrlFromBytes(bytes, mediaMime(tries[i]));
+                if (bytes && bytes.length) return blobUrlFromBytes(bytes, mediaMime(tries[i]), tries[i]);
             }
             lastAudioError = "fs read failed tries=" + tries.length;
         } else {
