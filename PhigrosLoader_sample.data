@@ -15,13 +15,13 @@
  */
 (function (global) {
     "use strict";
-    if (global.__plsGxDropLoaded26) {
-        global.__plsGxDropVer = 26;
+    if (global.__plsGxDropLoaded29) {
+        global.__plsGxDropVer = 29;
         try { if (typeof global.i_gx_drop_boot === "function") global.i_gx_drop_boot(); } catch (e0) {}
         return;
     }
-    global.__plsGxDropLoaded26 = 1;
-    global.__plsGxDropVer = 26;
+    global.__plsGxDropLoaded29 = 1;
+    global.__plsGxDropVer = 29;
 
     var STATUS_IDLE = 0;
     var STATUS_HOVER = 1;
@@ -49,6 +49,10 @@
     var lastReadChunk = "";
     var lastHeadText = "";
     var extractedFiles = {};
+    var fsWanted = 0;
+    var fsGateDone = 0;
+    var fsPicking = 0;
+    var fsUiReady = 0;
     var extractedList = [];
     var importedZipBytes = null;
 
@@ -964,15 +968,18 @@
     }
 
     function onPickChange(ev) {
+        fsPicking = 0;
         exportDropApi();
         var el = ev && ev.target;
         var file = el && el.files && el.files[0];
         restoreFocus();
         if (file) takeFile(file);
         else pokeUnpause();
+        reenterFullscreenSoon();
         setTimeout(function () {
             restoreFocus();
             replacePickInput();
+            reenterFullscreenSoon();
         }, 0);
     }
 
@@ -986,9 +993,15 @@
         el.style.cssText = "position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer;z-index:3;margin:0;padding:0;border:0;font-size:24px;";
         el.addEventListener("change", onPickChange);
         el.addEventListener("input", onPickChange);
-        el.addEventListener("cancel", function () { pokeUnpause(); });
+        el.addEventListener("cancel", function () {
+            fsPicking = 0;
+            pokeUnpause();
+            reenterFullscreenSoon();
+        });
         el.addEventListener("click", function (ev) {
             if (ev && ev.stopPropagation) ev.stopPropagation();
+            fsPicking = 1;
+            hideFsOverlays();
             unpauseGame(false);
         });
         return el;
@@ -1051,6 +1064,8 @@
 
     function onReturnFromDialog() {
         if (restoringFocus) return;
+        fsPicking = 0;
+        if (fsWanted) reenterFullscreenSoon();
         if (!dropLayerOpen && state.status !== STATUS_READING && state.status !== STATUS_OK) return;
         pokeUnpause();
         exportDropApi();
@@ -1081,6 +1096,9 @@
         if (dropLayerOpen) {
             replacePickInput();
             if (state.status === STATUS_IDLE) setDropVisual("点下方按钮选择 .zip / .pez 谱面包");
+            hideFsOverlays();
+        } else if (wasOpen) {
+            reenterFullscreenSoon();
         }
         return 1;
     }
@@ -1099,8 +1117,250 @@
         return 1;
     }
 
+    function isMobileView() {
+        try {
+            if (window.matchMedia && (window.matchMedia("(pointer:coarse)").matches || window.matchMedia("(hover:none)").matches)) return true;
+        } catch (e0) {}
+        if (typeof window !== "undefined" && "ontouchstart" in window) return true;
+        return Math.min(window.innerWidth || 0, window.innerHeight || 0) <= 920;
+    }
+
+    function isPortraitView() {
+        return (window.innerHeight || 0) > (window.innerWidth || 0) * 1.05;
+    }
+
+    function isStandaloneDisplay() {
+        try {
+            if (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) return true;
+        } catch (e0) {}
+        return !!(typeof navigator !== "undefined" && navigator.standalone);
+    }
+
+    function isPageFullscreen() {
+        return !!(document.fullscreenElement || document.webkitFullscreenElement || document.msFullscreenElement);
+    }
+
+    function shouldOfferFullscreen() {
+        return !isStandaloneDisplay();
+    }
+
+    function wantsBlockingGate() {
+        return isMobileView() || isPortraitView();
+    }
+
+    function loadFsFlags() {
+        try { if (sessionStorage.getItem("plsFsWanted") === "1") fsWanted = 1; } catch (e0) {}
+        try { if (sessionStorage.getItem("plsFsGateDone") === "1") fsGateDone = 1; } catch (e1) {}
+    }
+
+    function markFsWanted() {
+        fsWanted = 1;
+        try { sessionStorage.setItem("plsFsWanted", "1"); } catch (e0) {}
+    }
+
+    function markFsGateDone() {
+        fsGateDone = 1;
+        try { sessionStorage.setItem("plsFsGateDone", "1"); } catch (e0) {}
+    }
+
+    function relayoutGame() {
+        try { if (typeof ensureAspectRatio === "function") ensureAspectRatio(); } catch (e0) {}
+        try { window.dispatchEvent(new Event("resize")); } catch (e1) {}
+    }
+
+    function lockLandscape() {
+        try {
+            var ori = screen.orientation || screen.mozOrientation;
+            if (ori && typeof ori.lock === "function") ori.lock("landscape").catch(function () {});
+        } catch (e0) {}
+        try { if (screen.lockOrientation) screen.lockOrientation("landscape"); } catch (e1) {}
+        try { if (screen.mozLockOrientation) screen.mozLockOrientation("landscape"); } catch (e2) {}
+    }
+
+    function requestPageFullscreen() {
+        var el = document.documentElement;
+        var fn = el.requestFullscreen || el.webkitRequestFullscreen || el.webkitRequestFullScreen || el.msRequestFullscreen;
+        if (!fn) return Promise.resolve(false);
+        try {
+            var ret = fn.call(el, { navigationUI: "hide" });
+            if (ret && typeof ret.then === "function") {
+                return ret.then(function () { return true; }).catch(function () { return false; });
+            }
+            return Promise.resolve(true);
+        } catch (e0) {
+            return Promise.resolve(false);
+        }
+    }
+
+    function hideFsOverlays() {
+        var gate = document.getElementById("pls-gx-fs-gate");
+        if (gate) gate.style.display = "none";
+        var chip = document.getElementById("pls-gx-fs-chip");
+        if (chip) chip.style.display = "none";
+    }
+
+    function dismissFsGate() {
+        var gate = document.getElementById("pls-gx-fs-gate");
+        if (gate && gate.parentNode) gate.parentNode.removeChild(gate);
+        relayoutGame();
+        setTimeout(relayoutGame, 120);
+        setTimeout(relayoutGame, 400);
+        syncFsChrome();
+    }
+
+    function enterFullscreenPlay() {
+        markFsWanted();
+        markFsGateDone();
+        requestPageFullscreen().then(function () {
+            lockLandscape();
+            dismissFsGate();
+        });
+    }
+
+    function reenterFullscreenSoon() {
+        if (!fsWanted || fsPicking || dropLayerOpen) {
+            syncFsChrome();
+            return;
+        }
+        requestPageFullscreen().then(function (ok) {
+            if (ok) lockLandscape();
+            relayoutGame();
+            syncFsChrome();
+        });
+        setTimeout(function () {
+            if (fsWanted && !isPageFullscreen()) syncFsChrome();
+        }, 350);
+    }
+
+    function syncRotateHint() {
+        if (typeof document === "undefined") return;
+        var hint = document.getElementById("pls-gx-rotate-hint");
+        if (!isPortraitView() || document.getElementById("pls-gx-fs-gate") || dropLayerOpen) {
+            if (hint) hint.style.display = "none";
+            return;
+        }
+        if (!hint) {
+            hint = document.createElement("div");
+            hint.id = "pls-gx-rotate-hint";
+            hint.lang = "en-US";
+            hint.textContent = "Rotate to landscape";
+            hint.style.cssText = "position:fixed;left:0;right:0;top:0;z-index:2147483643;background:#bdff00;color:#111;text-align:center;padding:10px 12px;font:600 15px/1.3 arial,sans-serif;";
+            (document.body || document.documentElement).appendChild(hint);
+        }
+        hint.style.display = "block";
+    }
+
+    function ensureFsStyle() {
+        if (document.getElementById("pls-gx-fs-style")) return;
+        var st = document.createElement("style");
+        st.id = "pls-gx-fs-style";
+        st.textContent = "html,body{margin:0;background:#060612;overflow:hidden;height:100%;height:100dvh}#pls-gx-fs-gate{position:fixed;inset:0;z-index:2147483646;background:#060612;color:#eee;display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:arial,sans-serif;text-align:center;padding:24px;-webkit-tap-highlight-color:transparent}#pls-gx-fs-gate p{opacity:.85;margin:0 0 22px;line-height:1.55;font-size:1.02rem}#pls-gx-fs-gate b{display:inline-block;background:#bdff00;color:#111;border-radius:12px;padding:14px 28px;font-size:1.05rem}#pls-gx-fs-chip{position:fixed;right:12px;bottom:12px;z-index:2147483644;background:#bdff00;color:#111;border:0;border-radius:10px;padding:10px 14px;font:700 14px arial,sans-serif;cursor:pointer;-webkit-tap-highlight-color:transparent}";
+        (document.head || document.documentElement).appendChild(st);
+    }
+
+    function showFullGate() {
+        ensureFsStyle();
+        var gate = document.getElementById("pls-gx-fs-gate");
+        if (!gate) {
+            gate = document.createElement("div");
+            gate.id = "pls-gx-fs-gate";
+            gate.lang = "en-US";
+            gate.innerHTML = "<p>Rotate to landscape.<br>Tap fullscreen before playing.</p><b>Fullscreen</b>";
+            gate.addEventListener("click", function (ev) {
+                ev.preventDefault();
+                enterFullscreenPlay();
+            }, true);
+            (document.body || document.documentElement).appendChild(gate);
+        }
+        gate.style.display = "flex";
+        var chip = document.getElementById("pls-gx-fs-chip");
+        if (chip) chip.style.display = "none";
+    }
+
+    function showCompactFs() {
+        ensureFsStyle();
+        var gate = document.getElementById("pls-gx-fs-gate");
+        if (gate) gate.style.display = "none";
+        var chip = document.getElementById("pls-gx-fs-chip");
+        if (!chip) {
+            chip = document.createElement("button");
+            chip.type = "button";
+            chip.id = "pls-gx-fs-chip";
+            chip.lang = "en-US";
+            chip.textContent = "Fullscreen";
+            chip.addEventListener("click", function (ev) {
+                ev.preventDefault();
+                enterFullscreenPlay();
+            });
+            (document.body || document.documentElement).appendChild(chip);
+        }
+        chip.style.display = "block";
+    }
+
+    function syncFsChrome() {
+        if (typeof document === "undefined") return;
+        if (dropLayerOpen || fsPicking) {
+            hideFsOverlays();
+            syncRotateHint();
+            return;
+        }
+        if (isPageFullscreen()) {
+            hideFsOverlays();
+            syncRotateHint();
+            return;
+        }
+        if (!shouldOfferFullscreen()) {
+            hideFsOverlays();
+            syncRotateHint();
+            return;
+        }
+        if (!fsGateDone && wantsBlockingGate()) showFullGate();
+        else showCompactFs();
+        syncRotateHint();
+    }
+
+    function bindFsListeners() {
+        if (fsUiReady) return;
+        fsUiReady = 1;
+        document.addEventListener("fullscreenchange", function () {
+            if (!isPageFullscreen() && fsWanted && !fsPicking) syncFsChrome();
+            else {
+                relayoutGame();
+                syncFsChrome();
+            }
+        });
+        document.addEventListener("webkitfullscreenchange", function () {
+            relayoutGame();
+            syncFsChrome();
+        });
+        window.addEventListener("orientationchange", function () { setTimeout(function () { relayoutGame(); syncFsChrome(); }, 200); });
+        window.addEventListener("resize", function () { syncFsChrome(); });
+        window.addEventListener("focus", function () { if (fsWanted) reenterFullscreenSoon(); });
+        document.addEventListener("visibilitychange", function () {
+            if (document.visibilityState === "visible" && fsWanted) reenterFullscreenSoon();
+        });
+        try {
+            if (window.visualViewport) {
+                visualViewport.addEventListener("resize", function () { relayoutGame(); syncFsChrome(); });
+            }
+        } catch (e0) {}
+    }
+
+    function installFsUi() {
+        if (typeof document === "undefined") return;
+        loadFsFlags();
+        ensureFsStyle();
+        bindFsListeners();
+        if (!document.body) {
+            document.addEventListener("DOMContentLoaded", syncFsChrome);
+            return;
+        }
+        syncFsChrome();
+    }
+
     function boot() {
         if (typeof document === "undefined") return 0;
+        installFsUi();
         hideOverlayFileInput();
         dropLayer();
         patchPause();
@@ -1671,6 +1931,7 @@
         }
     };
     global.i_gx_drop_boot = function () { return boot(); };
+    try { installFsUi(); } catch (eFs) {}
     global.i_gx_drop_set_enabled = function (value) { boot(); return setEnabled(toNum(value) > 0); };
     global.i_gx_import_url = function () {
         return importPageUrl();
@@ -3355,13 +3616,13 @@
  */
 (function (global) {
     "use strict";
-    if (global.__plsGxDropLoaded26) {
-        global.__plsGxDropVer = 26;
+    if (global.__plsGxDropLoaded29) {
+        global.__plsGxDropVer = 29;
         try { if (typeof global.i_gx_drop_boot === "function") global.i_gx_drop_boot(); } catch (e0) {}
         return;
     }
-    global.__plsGxDropLoaded26 = 1;
-    global.__plsGxDropVer = 26;
+    global.__plsGxDropLoaded29 = 1;
+    global.__plsGxDropVer = 29;
 
     var STATUS_IDLE = 0;
     var STATUS_HOVER = 1;
@@ -3389,6 +3650,10 @@
     var lastReadChunk = "";
     var lastHeadText = "";
     var extractedFiles = {};
+    var fsWanted = 0;
+    var fsGateDone = 0;
+    var fsPicking = 0;
+    var fsUiReady = 0;
     var extractedList = [];
     var importedZipBytes = null;
 
@@ -4304,15 +4569,18 @@
     }
 
     function onPickChange(ev) {
+        fsPicking = 0;
         exportDropApi();
         var el = ev && ev.target;
         var file = el && el.files && el.files[0];
         restoreFocus();
         if (file) takeFile(file);
         else pokeUnpause();
+        reenterFullscreenSoon();
         setTimeout(function () {
             restoreFocus();
             replacePickInput();
+            reenterFullscreenSoon();
         }, 0);
     }
 
@@ -4326,9 +4594,15 @@
         el.style.cssText = "position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer;z-index:3;margin:0;padding:0;border:0;font-size:24px;";
         el.addEventListener("change", onPickChange);
         el.addEventListener("input", onPickChange);
-        el.addEventListener("cancel", function () { pokeUnpause(); });
+        el.addEventListener("cancel", function () {
+            fsPicking = 0;
+            pokeUnpause();
+            reenterFullscreenSoon();
+        });
         el.addEventListener("click", function (ev) {
             if (ev && ev.stopPropagation) ev.stopPropagation();
+            fsPicking = 1;
+            hideFsOverlays();
             unpauseGame(false);
         });
         return el;
@@ -4391,6 +4665,8 @@
 
     function onReturnFromDialog() {
         if (restoringFocus) return;
+        fsPicking = 0;
+        if (fsWanted) reenterFullscreenSoon();
         if (!dropLayerOpen && state.status !== STATUS_READING && state.status !== STATUS_OK) return;
         pokeUnpause();
         exportDropApi();
@@ -4421,6 +4697,9 @@
         if (dropLayerOpen) {
             replacePickInput();
             if (state.status === STATUS_IDLE) setDropVisual("点下方按钮选择 .zip / .pez 谱面包");
+            hideFsOverlays();
+        } else if (wasOpen) {
+            reenterFullscreenSoon();
         }
         return 1;
     }
@@ -4439,8 +4718,250 @@
         return 1;
     }
 
+    function isMobileView() {
+        try {
+            if (window.matchMedia && (window.matchMedia("(pointer:coarse)").matches || window.matchMedia("(hover:none)").matches)) return true;
+        } catch (e0) {}
+        if (typeof window !== "undefined" && "ontouchstart" in window) return true;
+        return Math.min(window.innerWidth || 0, window.innerHeight || 0) <= 920;
+    }
+
+    function isPortraitView() {
+        return (window.innerHeight || 0) > (window.innerWidth || 0) * 1.05;
+    }
+
+    function isStandaloneDisplay() {
+        try {
+            if (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) return true;
+        } catch (e0) {}
+        return !!(typeof navigator !== "undefined" && navigator.standalone);
+    }
+
+    function isPageFullscreen() {
+        return !!(document.fullscreenElement || document.webkitFullscreenElement || document.msFullscreenElement);
+    }
+
+    function shouldOfferFullscreen() {
+        return !isStandaloneDisplay();
+    }
+
+    function wantsBlockingGate() {
+        return isMobileView() || isPortraitView();
+    }
+
+    function loadFsFlags() {
+        try { if (sessionStorage.getItem("plsFsWanted") === "1") fsWanted = 1; } catch (e0) {}
+        try { if (sessionStorage.getItem("plsFsGateDone") === "1") fsGateDone = 1; } catch (e1) {}
+    }
+
+    function markFsWanted() {
+        fsWanted = 1;
+        try { sessionStorage.setItem("plsFsWanted", "1"); } catch (e0) {}
+    }
+
+    function markFsGateDone() {
+        fsGateDone = 1;
+        try { sessionStorage.setItem("plsFsGateDone", "1"); } catch (e0) {}
+    }
+
+    function relayoutGame() {
+        try { if (typeof ensureAspectRatio === "function") ensureAspectRatio(); } catch (e0) {}
+        try { window.dispatchEvent(new Event("resize")); } catch (e1) {}
+    }
+
+    function lockLandscape() {
+        try {
+            var ori = screen.orientation || screen.mozOrientation;
+            if (ori && typeof ori.lock === "function") ori.lock("landscape").catch(function () {});
+        } catch (e0) {}
+        try { if (screen.lockOrientation) screen.lockOrientation("landscape"); } catch (e1) {}
+        try { if (screen.mozLockOrientation) screen.mozLockOrientation("landscape"); } catch (e2) {}
+    }
+
+    function requestPageFullscreen() {
+        var el = document.documentElement;
+        var fn = el.requestFullscreen || el.webkitRequestFullscreen || el.webkitRequestFullScreen || el.msRequestFullscreen;
+        if (!fn) return Promise.resolve(false);
+        try {
+            var ret = fn.call(el, { navigationUI: "hide" });
+            if (ret && typeof ret.then === "function") {
+                return ret.then(function () { return true; }).catch(function () { return false; });
+            }
+            return Promise.resolve(true);
+        } catch (e0) {
+            return Promise.resolve(false);
+        }
+    }
+
+    function hideFsOverlays() {
+        var gate = document.getElementById("pls-gx-fs-gate");
+        if (gate) gate.style.display = "none";
+        var chip = document.getElementById("pls-gx-fs-chip");
+        if (chip) chip.style.display = "none";
+    }
+
+    function dismissFsGate() {
+        var gate = document.getElementById("pls-gx-fs-gate");
+        if (gate && gate.parentNode) gate.parentNode.removeChild(gate);
+        relayoutGame();
+        setTimeout(relayoutGame, 120);
+        setTimeout(relayoutGame, 400);
+        syncFsChrome();
+    }
+
+    function enterFullscreenPlay() {
+        markFsWanted();
+        markFsGateDone();
+        requestPageFullscreen().then(function () {
+            lockLandscape();
+            dismissFsGate();
+        });
+    }
+
+    function reenterFullscreenSoon() {
+        if (!fsWanted || fsPicking || dropLayerOpen) {
+            syncFsChrome();
+            return;
+        }
+        requestPageFullscreen().then(function (ok) {
+            if (ok) lockLandscape();
+            relayoutGame();
+            syncFsChrome();
+        });
+        setTimeout(function () {
+            if (fsWanted && !isPageFullscreen()) syncFsChrome();
+        }, 350);
+    }
+
+    function syncRotateHint() {
+        if (typeof document === "undefined") return;
+        var hint = document.getElementById("pls-gx-rotate-hint");
+        if (!isPortraitView() || document.getElementById("pls-gx-fs-gate") || dropLayerOpen) {
+            if (hint) hint.style.display = "none";
+            return;
+        }
+        if (!hint) {
+            hint = document.createElement("div");
+            hint.id = "pls-gx-rotate-hint";
+            hint.lang = "en-US";
+            hint.textContent = "Rotate to landscape";
+            hint.style.cssText = "position:fixed;left:0;right:0;top:0;z-index:2147483643;background:#bdff00;color:#111;text-align:center;padding:10px 12px;font:600 15px/1.3 arial,sans-serif;";
+            (document.body || document.documentElement).appendChild(hint);
+        }
+        hint.style.display = "block";
+    }
+
+    function ensureFsStyle() {
+        if (document.getElementById("pls-gx-fs-style")) return;
+        var st = document.createElement("style");
+        st.id = "pls-gx-fs-style";
+        st.textContent = "html,body{margin:0;background:#060612;overflow:hidden;height:100%;height:100dvh}#pls-gx-fs-gate{position:fixed;inset:0;z-index:2147483646;background:#060612;color:#eee;display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:arial,sans-serif;text-align:center;padding:24px;-webkit-tap-highlight-color:transparent}#pls-gx-fs-gate p{opacity:.85;margin:0 0 22px;line-height:1.55;font-size:1.02rem}#pls-gx-fs-gate b{display:inline-block;background:#bdff00;color:#111;border-radius:12px;padding:14px 28px;font-size:1.05rem}#pls-gx-fs-chip{position:fixed;right:12px;bottom:12px;z-index:2147483644;background:#bdff00;color:#111;border:0;border-radius:10px;padding:10px 14px;font:700 14px arial,sans-serif;cursor:pointer;-webkit-tap-highlight-color:transparent}";
+        (document.head || document.documentElement).appendChild(st);
+    }
+
+    function showFullGate() {
+        ensureFsStyle();
+        var gate = document.getElementById("pls-gx-fs-gate");
+        if (!gate) {
+            gate = document.createElement("div");
+            gate.id = "pls-gx-fs-gate";
+            gate.lang = "en-US";
+            gate.innerHTML = "<p>Rotate to landscape.<br>Tap fullscreen before playing.</p><b>Fullscreen</b>";
+            gate.addEventListener("click", function (ev) {
+                ev.preventDefault();
+                enterFullscreenPlay();
+            }, true);
+            (document.body || document.documentElement).appendChild(gate);
+        }
+        gate.style.display = "flex";
+        var chip = document.getElementById("pls-gx-fs-chip");
+        if (chip) chip.style.display = "none";
+    }
+
+    function showCompactFs() {
+        ensureFsStyle();
+        var gate = document.getElementById("pls-gx-fs-gate");
+        if (gate) gate.style.display = "none";
+        var chip = document.getElementById("pls-gx-fs-chip");
+        if (!chip) {
+            chip = document.createElement("button");
+            chip.type = "button";
+            chip.id = "pls-gx-fs-chip";
+            chip.lang = "en-US";
+            chip.textContent = "Fullscreen";
+            chip.addEventListener("click", function (ev) {
+                ev.preventDefault();
+                enterFullscreenPlay();
+            });
+            (document.body || document.documentElement).appendChild(chip);
+        }
+        chip.style.display = "block";
+    }
+
+    function syncFsChrome() {
+        if (typeof document === "undefined") return;
+        if (dropLayerOpen || fsPicking) {
+            hideFsOverlays();
+            syncRotateHint();
+            return;
+        }
+        if (isPageFullscreen()) {
+            hideFsOverlays();
+            syncRotateHint();
+            return;
+        }
+        if (!shouldOfferFullscreen()) {
+            hideFsOverlays();
+            syncRotateHint();
+            return;
+        }
+        if (!fsGateDone && wantsBlockingGate()) showFullGate();
+        else showCompactFs();
+        syncRotateHint();
+    }
+
+    function bindFsListeners() {
+        if (fsUiReady) return;
+        fsUiReady = 1;
+        document.addEventListener("fullscreenchange", function () {
+            if (!isPageFullscreen() && fsWanted && !fsPicking) syncFsChrome();
+            else {
+                relayoutGame();
+                syncFsChrome();
+            }
+        });
+        document.addEventListener("webkitfullscreenchange", function () {
+            relayoutGame();
+            syncFsChrome();
+        });
+        window.addEventListener("orientationchange", function () { setTimeout(function () { relayoutGame(); syncFsChrome(); }, 200); });
+        window.addEventListener("resize", function () { syncFsChrome(); });
+        window.addEventListener("focus", function () { if (fsWanted) reenterFullscreenSoon(); });
+        document.addEventListener("visibilitychange", function () {
+            if (document.visibilityState === "visible" && fsWanted) reenterFullscreenSoon();
+        });
+        try {
+            if (window.visualViewport) {
+                visualViewport.addEventListener("resize", function () { relayoutGame(); syncFsChrome(); });
+            }
+        } catch (e0) {}
+    }
+
+    function installFsUi() {
+        if (typeof document === "undefined") return;
+        loadFsFlags();
+        ensureFsStyle();
+        bindFsListeners();
+        if (!document.body) {
+            document.addEventListener("DOMContentLoaded", syncFsChrome);
+            return;
+        }
+        syncFsChrome();
+    }
+
     function boot() {
         if (typeof document === "undefined") return 0;
+        installFsUi();
         hideOverlayFileInput();
         dropLayer();
         patchPause();
@@ -5011,6 +5532,7 @@
         }
     };
     global.i_gx_drop_boot = function () { return boot(); };
+    try { installFsUi(); } catch (eFs) {}
     global.i_gx_drop_set_enabled = function (value) { boot(); return setEnabled(toNum(value) > 0); };
     global.i_gx_import_url = function () {
         return importPageUrl();
@@ -7138,17 +7660,17 @@
     });
     bind("i_gx_video_shutdown", shutdownVideos);
 })(typeof globalThis !== "undefined" ? globalThis : window);
-D:\GMTEMP-LTS\GMS2TEMP\PhigrosLoader-sample_441200CC_YYC\resource\defaultnotes_0.yytex
-D:\GMTEMP-LTS\GMS2TEMP\PhigrosLoader-sample_441200CC_YYC\resource\defaultnotes_1.yytex
-D:\GMTEMP-LTS\GMS2TEMP\PhigrosLoader-sample_441200CC_YYC\resource\defaultnotes_2.yytex
-D:\GMTEMP-LTS\GMS2TEMP\PhigrosLoader-sample_441200CC_YYC\resource\audiogroup_hitsounds.dat
+D:\GMTEMP-LTS\GMS2TEMP\PhigrosLoader-sample_571E5A96_YYC\resource\defaultnotes_0.yytex
+D:\GMTEMP-LTS\GMS2TEMP\PhigrosLoader-sample_571E5A96_YYC\resource\defaultnotes_1.yytex
+D:\GMTEMP-LTS\GMS2TEMP\PhigrosLoader-sample_571E5A96_YYC\resource\defaultnotes_2.yytex
+D:\GMTEMP-LTS\GMS2TEMP\PhigrosLoader-sample_571E5A96_YYC\resource\audiogroup_hitsounds.dat
 GM_HTML5_BrowserTitle@Q3JlYXRlZCB3aXRoIEdhbWVNYWtlcjpTdHVkaW8=
 GM_HTML5_BackgroundColour@IzA=
 GM_HTML5_GameWidth@MTM2Ng==
 GM_HTML5_GameHeight@NzY4
 GM_HTML5_GameFolder@aHRtbDVnYW1l
 GM_HTML5_GameFilename@UGhpZ3Jvc0xvYWRlci1zYW1wbGUudW54
-GM_HTML5_CacheBust@NzI4OTQwMDU5
+GM_HTML5_CacheBust@NjYyMTk3NTU0
 GM_HTML5_InjectDisableCache@
 GM_HTML5_InjectSplashScreen@
 GM_HTML5_InjectCenterStyle@
