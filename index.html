@@ -438,8 +438,18 @@
           startingAspect = startingWidth / startingHeight;
         }
         
-        const maxWidth = window.innerWidth;
-        const maxHeight = window.innerHeight;
+                /* plsFillViewport */
+        var maxWidth = window.innerWidth;
+        var maxHeight = window.innerHeight;
+        try {
+          if (window.visualViewport && visualViewport.width > 1 && visualViewport.height > 1) {
+            maxWidth = visualViewport.width;
+            maxHeight = visualViewport.height;
+          }
+        } catch (ePlsVp) {}
+        startingWidth = maxWidth;
+        startingHeight = maxHeight;
+        startingAspect = maxWidth / Math.max(1, maxHeight);
         var newHeight, newWidth;
 
         // Find the limiting dimension.
@@ -492,10 +502,10 @@
       }
     </script>
     <script id="pls-gx-drop-boot">
-(function(){function add(src,cb){var s=document.createElement("script");s.src=src;if(cb)s.onload=cb;(document.head||document.documentElement).appendChild(s);}function load(){if(window.__plsGxDropVer>=29){if(window.i_gx_drop_boot)window.i_gx_drop_boot();return;}add("gx_drop.js?v=gxdrop29",function(){if(window.i_gx_drop_boot)window.i_gx_drop_boot();});add("gx_video_boot.js?v=gxvideo9");}if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",load);else load();})();
+(function(){function add(src,cb){var s=document.createElement("script");s.src=src;if(cb)s.onload=cb;(document.head||document.documentElement).appendChild(s);}function load(){if(window.__plsGxDropVer>=30){if(window.i_gx_drop_boot)window.i_gx_drop_boot();return;}add("gx_drop.js?v=gxdrop30",function(){if(window.i_gx_drop_boot)window.i_gx_drop_boot();});add("gx_video_boot.js?v=gxvideo9");}if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",load);else load();})();
 </script>
     <script id="pls-gx-fs-boot">
-(function(){function mobile(){try{if(window.matchMedia&&(matchMedia("(pointer:coarse)").matches||matchMedia("(hover:none)").matches))return true;}catch(e){}return("ontouchstart"in window)||Math.min(innerWidth,innerHeight)<=920||innerHeight>innerWidth*1.05;}try{if(sessionStorage.getItem("plsFsGateDone")==="1")return;}catch(e0){}if(!mobile())return;if(document.getElementById("pls-gx-fs-gate"))return;var st=document.createElement("style");st.id="pls-gx-fs-style";st.textContent="html,body{margin:0;background:#060612;overflow:hidden;height:100%;height:100dvh}#pls-gx-fs-gate{position:fixed;inset:0;z-index:2147483646;background:#060612;color:#eee;display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:arial,sans-serif;text-align:center;padding:24px;-webkit-tap-highlight-color:transparent}#pls-gx-fs-gate p{opacity:.85;margin:0 0 22px;line-height:1.55;font-size:1.02rem}#pls-gx-fs-gate b{display:inline-block;background:#bdff00;color:#111;border-radius:12px;padding:14px 28px;font-size:1.05rem}";(document.head||document.documentElement).appendChild(st);var g=document.createElement("div");g.id="pls-gx-fs-gate";g.lang="en-US";g.innerHTML="<p>Rotate to landscape.<br>Tap fullscreen before playing.</p><b>Fullscreen</b>";function go(ev){if(ev)ev.preventDefault();var el=document.documentElement;var fn=el.requestFullscreen||el.webkitRequestFullscreen||el.webkitRequestFullScreen;function done(){try{sessionStorage.setItem("plsFsWanted","1");sessionStorage.setItem("plsFsGateDone","1");}catch(e5){}try{var o=screen.orientation;if(o&&o.lock)o.lock("landscape").catch(function(){});}catch(e){}if(g.parentNode)g.parentNode.removeChild(g);try{if(typeof ensureAspectRatio==="function")ensureAspectRatio();}catch(e2){}try{window.dispatchEvent(new Event("resize"));}catch(e3){}}try{var p=fn?fn.call(el,{navigationUI:"hide"}):null;if(p&&p.then)p.then(done).catch(done);else done();}catch(e4){done();}}g.addEventListener("click",go,true);function put(){(document.body||document.documentElement).appendChild(g);}if(document.body)put();else document.addEventListener("DOMContentLoaded",put);})();
+(function(){function mobile(){try{if(window.matchMedia&&(matchMedia("(pointer:coarse)").matches||matchMedia("(hover:none)").matches))return true;}catch(e){}return("ontouchstart"in window)||Math.min(innerWidth,innerHeight)<=920||innerHeight>innerWidth*1.05;}try{if(sessionStorage.getItem("plsFsGateDone")==="1")return;}catch(e0){}if(!mobile())return;if(document.getElementById("pls-gx-fs-gate"))return;var st=document.createElement("style");st.id="pls-gx-fs-style";st.textContent="html,body{margin:0;background:#060612;overflow:hidden;height:100%;height:100dvh;width:100%;min-width:0;min-height:0}#pls-gx-fs-gate{position:fixed;inset:0;z-index:2147483646;background:#060612;color:#eee;display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:arial,sans-serif;text-align:center;padding:24px;-webkit-tap-highlight-color:transparent}#pls-gx-fs-gate p{opacity:.85;margin:0 0 22px;line-height:1.55;font-size:1.02rem}#pls-gx-fs-gate b{display:inline-block;background:#bdff00;color:#111;border-radius:12px;padding:14px 28px;font-size:1.05rem}";(document.head||document.documentElement).appendChild(st);var g=document.createElement("div");g.id="pls-gx-fs-gate";g.lang="en-US";g.innerHTML="<p>Rotate to landscape.<br>Tap fullscreen before playing.</p><b>Fullscreen</b>";function go(ev){if(ev)ev.preventDefault();var el=document.documentElement;var fn=el.requestFullscreen||el.webkitRequestFullscreen||el.webkitRequestFullScreen;function done(){try{sessionStorage.setItem("plsFsWanted","1");sessionStorage.setItem("plsFsGateDone","1");}catch(e5){}try{var o=screen.orientation;if(o&&o.lock)o.lock("landscape").catch(function(){});}catch(e){}if(g.parentNode)g.parentNode.removeChild(g);try{var w=innerWidth,h=innerHeight;if(window.visualViewport&&visualViewport.width>1){w=visualViewport.width;h=visualViewport.height;}startingWidth=w;startingHeight=h;startingAspect=w/Math.max(1,h);}catch(e6){}try{if(typeof ensureAspectRatio==="function")ensureAspectRatio();}catch(e2){}try{window.dispatchEvent(new Event("resize"));}catch(e3){}}try{var p=fn?fn.call(el,{navigationUI:"hide"}):null;if(p&&p.then)p.then(done).catch(done);else done();}catch(e4){done();}}g.addEventListener("click",go,true);function put(){(document.body||document.documentElement).appendChild(g);}if(document.body)put();else document.addEventListener("DOMContentLoaded",put);})();
 </script>
     <script async type="text/javascript" src="PhigrosLoader_sample.js"></script>
   </body>

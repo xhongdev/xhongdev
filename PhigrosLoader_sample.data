@@ -15,13 +15,13 @@
  */
 (function (global) {
     "use strict";
-    if (global.__plsGxDropLoaded29) {
-        global.__plsGxDropVer = 29;
+    if (global.__plsGxDropLoaded30) {
+        global.__plsGxDropVer = 30;
         try { if (typeof global.i_gx_drop_boot === "function") global.i_gx_drop_boot(); } catch (e0) {}
         return;
     }
-    global.__plsGxDropLoaded29 = 1;
-    global.__plsGxDropVer = 29;
+    global.__plsGxDropLoaded30 = 1;
+    global.__plsGxDropVer = 30;
 
     var STATUS_IDLE = 0;
     var STATUS_HOVER = 1;
@@ -53,6 +53,9 @@
     var fsGateDone = 0;
     var fsPicking = 0;
     var fsUiReady = 0;
+    var canvasFillReady = 0;
+    var canvasFillApplying = 0;
+    var canvasFillLast = "";
     var extractedList = [];
     var importedZipBytes = null;
 
@@ -1163,7 +1166,104 @@
         try { sessionStorage.setItem("plsFsGateDone", "1"); } catch (e0) {}
     }
 
+    function viewportCssSize() {
+        var w = window.innerWidth || 0;
+        var h = window.innerHeight || 0;
+        var x = 0;
+        var y = 0;
+        try {
+            var vv = window.visualViewport;
+            if (vv && vv.width > 1 && vv.height > 1) {
+                w = vv.width;
+                h = vv.height;
+                x = vv.offsetLeft || 0;
+                y = vv.offsetTop || 0;
+            }
+        } catch (e0) {}
+        return {
+            w: Math.max(1, w),
+            h: Math.max(1, h),
+            x: x,
+            y: y
+        };
+    }
+
+    function fillGameCanvas() {
+        if (typeof document === "undefined") return;
+        var canvas = document.getElementById("canvas");
+        if (!canvas) return;
+        var vp = viewportCssSize();
+        var key = vp.w + "x" + vp.h + "@" + vp.x + "," + vp.y;
+        try {
+            window.startingWidth = vp.w;
+            window.startingHeight = vp.h;
+            window.startingAspect = vp.w / vp.h;
+        } catch (e0) {}
+        if (canvasFillLast === key && canvas.style.width === (vp.w + "px") && canvas.style.height === (vp.h + "px")) {
+            return;
+        }
+        canvasFillApplying = 1;
+        try {
+            canvasFillLast = key;
+            try { canvas.classList.remove("animatedSizeTransitions"); } catch (e1) {}
+            canvas.style.width = vp.w + "px";
+            canvas.style.height = vp.h + "px";
+            canvas.style.margin = "0px";
+            canvas.style.padding = "0px";
+            canvas.style.maxWidth = "none";
+            canvas.style.maxHeight = "none";
+            canvas.style.position = "fixed";
+            canvas.style.left = vp.x + "px";
+            canvas.style.top = vp.y + "px";
+            canvas.style.right = "auto";
+            canvas.style.bottom = "auto";
+        } catch (e2) {
+        } finally {
+            canvasFillApplying = 0;
+        }
+    }
+
+    function installCanvasFill() {
+        if (canvasFillReady || typeof document === "undefined") return;
+        canvasFillReady = 1;
+        window.ensureAspectRatio = function () {
+            fillGameCanvas();
+        };
+        var origSet = window.onGameSetWindowSize;
+        window.onGameSetWindowSize = function (width, height) {
+            if (typeof origSet === "function") {
+                try { origSet(width, height); } catch (e0) {}
+            }
+            fillGameCanvas();
+        };
+        try {
+            if (typeof MutationObserver === "function") {
+                var watch = function (el) {
+                    if (!el || el.__plsFillMo) return;
+                    el.__plsFillMo = 1;
+                    var mo = new MutationObserver(function () {
+                        if (!canvasFillApplying) fillGameCanvas();
+                    });
+                    mo.observe(el, { attributes: true, attributeFilter: ["style", "class"] });
+                };
+                var canvas = document.getElementById("canvas");
+                if (canvas) watch(canvas);
+                else {
+                    document.addEventListener("DOMContentLoaded", function () {
+                        watch(document.getElementById("canvas"));
+                        fillGameCanvas();
+                    });
+                }
+            }
+        } catch (e1) {}
+        fillGameCanvas();
+        setTimeout(fillGameCanvas, 50);
+        setTimeout(fillGameCanvas, 250);
+        setTimeout(fillGameCanvas, 800);
+    }
+
     function relayoutGame() {
+        fillGameCanvas();
         try { if (typeof ensureAspectRatio === "function") ensureAspectRatio(); } catch (e0) {}
         try { window.dispatchEvent(new Event("resize")); } catch (e1) {}
     }
@@ -1254,7 +1354,7 @@
         if (document.getElementById("pls-gx-fs-style")) return;
         var st = document.createElement("style");
         st.id = "pls-gx-fs-style";
-        st.textContent = "html,body{margin:0;background:#060612;overflow:hidden;height:100%;height:100dvh}#pls-gx-fs-gate{position:fixed;inset:0;z-index:2147483646;background:#060612;color:#eee;display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:arial,sans-serif;text-align:center;padding:24px;-webkit-tap-highlight-color:transparent}#pls-gx-fs-gate p{opacity:.85;margin:0 0 22px;line-height:1.55;font-size:1.02rem}#pls-gx-fs-gate b{display:inline-block;background:#bdff00;color:#111;border-radius:12px;padding:14px 28px;font-size:1.05rem}#pls-gx-fs-chip{position:fixed;right:12px;bottom:12px;z-index:2147483644;background:#bdff00;color:#111;border:0;border-radius:10px;padding:10px 14px;font:700 14px arial,sans-serif;cursor:pointer;-webkit-tap-highlight-color:transparent}";
+        st.textContent = "html,body{margin:0;background:#060612;overflow:hidden;height:100%;height:100dvh;width:100%;min-width:0;min-height:0}#canvas,canvas.emscripten{padding:0!important;margin:0!important;max-width:none!important;max-height:none!important;transition:none!important}#pls-gx-fs-gate{position:fixed;inset:0;z-index:2147483646;background:#060612;color:#eee;display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:arial,sans-serif;text-align:center;padding:24px;-webkit-tap-highlight-color:transparent}#pls-gx-fs-gate p{opacity:.85;margin:0 0 22px;line-height:1.55;font-size:1.02rem}#pls-gx-fs-gate b{display:inline-block;background:#bdff00;color:#111;border-radius:12px;padding:14px 28px;font-size:1.05rem}#pls-gx-fs-chip{position:fixed;right:12px;bottom:12px;z-index:2147483644;background:#bdff00;color:#111;border:0;border-radius:10px;padding:10px 14px;font:700 14px arial,sans-serif;cursor:pointer;-webkit-tap-highlight-color:transparent}";
         (document.head || document.documentElement).appendChild(st);
     }
 
@@ -1334,7 +1434,7 @@
             syncFsChrome();
         });
         window.addEventListener("orientationchange", function () { setTimeout(function () { relayoutGame(); syncFsChrome(); }, 200); });
-        window.addEventListener("resize", function () { syncFsChrome(); });
+        window.addEventListener("resize", function () { fillGameCanvas(); syncFsChrome(); });
         window.addEventListener("focus", function () { if (fsWanted) reenterFullscreenSoon(); });
         document.addEventListener("visibilitychange", function () {
             if (document.visibilityState === "visible" && fsWanted) reenterFullscreenSoon();
@@ -1351,10 +1451,15 @@
         loadFsFlags();
         ensureFsStyle();
         bindFsListeners();
+        installCanvasFill();
         if (!document.body) {
-            document.addEventListener("DOMContentLoaded", syncFsChrome);
+            document.addEventListener("DOMContentLoaded", function () {
+                fillGameCanvas();
+                syncFsChrome();
+            });
             return;
         }
+        fillGameCanvas();
         syncFsChrome();
     }
 
@@ -3616,13 +3721,13 @@
  */
 (function (global) {
     "use strict";
-    if (global.__plsGxDropLoaded29) {
-        global.__plsGxDropVer = 29;
+    if (global.__plsGxDropLoaded30) {
+        global.__plsGxDropVer = 30;
         try { if (typeof global.i_gx_drop_boot === "function") global.i_gx_drop_boot(); } catch (e0) {}
         return;
     }
-    global.__plsGxDropLoaded29 = 1;
-    global.__plsGxDropVer = 29;
+    global.__plsGxDropLoaded30 = 1;
+    global.__plsGxDropVer = 30;
 
     var STATUS_IDLE = 0;
     var STATUS_HOVER = 1;
@@ -3654,6 +3759,9 @@
     var fsGateDone = 0;
     var fsPicking = 0;
     var fsUiReady = 0;
+    var canvasFillReady = 0;
+    var canvasFillApplying = 0;
+    var canvasFillLast = "";
     var extractedList = [];
     var importedZipBytes = null;
 
@@ -4764,7 +4872,104 @@
         try { sessionStorage.setItem("plsFsGateDone", "1"); } catch (e0) {}
     }
 
+    function viewportCssSize() {
+        var w = window.innerWidth || 0;
+        var h = window.innerHeight || 0;
+        var x = 0;
+        var y = 0;
+        try {
+            var vv = window.visualViewport;
+            if (vv && vv.width > 1 && vv.height > 1) {
+                w = vv.width;
+                h = vv.height;
+                x = vv.offsetLeft || 0;
+                y = vv.offsetTop || 0;
+            }
+        } catch (e0) {}
+        return {
+            w: Math.max(1, w),
+            h: Math.max(1, h),
+            x: x,
+            y: y
+        };
+    }
+
+    function fillGameCanvas() {
+        if (typeof document === "undefined") return;
+        var canvas = document.getElementById("canvas");
+        if (!canvas) return;
+        var vp = viewportCssSize();
+        var key = vp.w + "x" + vp.h + "@" + vp.x + "," + vp.y;
+        try {
+            window.startingWidth = vp.w;
+            window.startingHeight = vp.h;
+            window.startingAspect = vp.w / vp.h;
+        } catch (e0) {}
+        if (canvasFillLast === key && canvas.style.width === (vp.w + "px") && canvas.style.height === (vp.h + "px")) {
+            return;
+        }
+        canvasFillApplying = 1;
+        try {
+            canvasFillLast = key;
+            try { canvas.classList.remove("animatedSizeTransitions"); } catch (e1) {}
+            canvas.style.width = vp.w + "px";
+            canvas.style.height = vp.h + "px";
+            canvas.style.margin = "0px";
+            canvas.style.padding = "0px";
+            canvas.style.maxWidth = "none";
+            canvas.style.maxHeight = "none";
+            canvas.style.position = "fixed";
+            canvas.style.left = vp.x + "px";
+            canvas.style.top = vp.y + "px";
+            canvas.style.right = "auto";
+            canvas.style.bottom = "auto";
+        } catch (e2) {
+        } finally {
+            canvasFillApplying = 0;
+        }
+    }
+
+    function installCanvasFill() {
+        if (canvasFillReady || typeof document === "undefined") return;
+        canvasFillReady = 1;
+        window.ensureAspectRatio = function () {
+            fillGameCanvas();
+        };
+        var origSet = window.onGameSetWindowSize;
+        window.onGameSetWindowSize = function (width, height) {
+            if (typeof origSet === "function") {
+                try { origSet(width, height); } catch (e0) {}
+            }
+            fillGameCanvas();
+        };
+        try {
+            if (typeof MutationObserver === "function") {
+                var watch = function (el) {
+                    if (!el || el.__plsFillMo) return;
+                    el.__plsFillMo = 1;
+                    var mo = new MutationObserver(function () {
+                        if (!canvasFillApplying) fillGameCanvas();
+                    });
+                    mo.observe(el, { attributes: true, attributeFilter: ["style", "class"] });
+                };
+                var canvas = document.getElementById("canvas");
+                if (canvas) watch(canvas);
+                else {
+                    document.addEventListener("DOMContentLoaded", function () {
+                        watch(document.getElementById("canvas"));
+                        fillGameCanvas();
+                    });
+                }
+            }
+        } catch (e1) {}
+        fillGameCanvas();
+        setTimeout(fillGameCanvas, 50);
+        setTimeout(fillGameCanvas, 250);
+        setTimeout(fillGameCanvas, 800);
+    }
+
     function relayoutGame() {
+        fillGameCanvas();
         try { if (typeof ensureAspectRatio === "function") ensureAspectRatio(); } catch (e0) {}
         try { window.dispatchEvent(new Event("resize")); } catch (e1) {}
     }
@@ -4855,7 +5060,7 @@
         if (document.getElementById("pls-gx-fs-style")) return;
         var st = document.createElement("style");
         st.id = "pls-gx-fs-style";
-        st.textContent = "html,body{margin:0;background:#060612;overflow:hidden;height:100%;height:100dvh}#pls-gx-fs-gate{position:fixed;inset:0;z-index:2147483646;background:#060612;color:#eee;display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:arial,sans-serif;text-align:center;padding:24px;-webkit-tap-highlight-color:transparent}#pls-gx-fs-gate p{opacity:.85;margin:0 0 22px;line-height:1.55;font-size:1.02rem}#pls-gx-fs-gate b{display:inline-block;background:#bdff00;color:#111;border-radius:12px;padding:14px 28px;font-size:1.05rem}#pls-gx-fs-chip{position:fixed;right:12px;bottom:12px;z-index:2147483644;background:#bdff00;color:#111;border:0;border-radius:10px;padding:10px 14px;font:700 14px arial,sans-serif;cursor:pointer;-webkit-tap-highlight-color:transparent}";
+        st.textContent = "html,body{margin:0;background:#060612;overflow:hidden;height:100%;height:100dvh;width:100%;min-width:0;min-height:0}#canvas,canvas.emscripten{padding:0!important;margin:0!important;max-width:none!important;max-height:none!important;transition:none!important}#pls-gx-fs-gate{position:fixed;inset:0;z-index:2147483646;background:#060612;color:#eee;display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:arial,sans-serif;text-align:center;padding:24px;-webkit-tap-highlight-color:transparent}#pls-gx-fs-gate p{opacity:.85;margin:0 0 22px;line-height:1.55;font-size:1.02rem}#pls-gx-fs-gate b{display:inline-block;background:#bdff00;color:#111;border-radius:12px;padding:14px 28px;font-size:1.05rem}#pls-gx-fs-chip{position:fixed;right:12px;bottom:12px;z-index:2147483644;background:#bdff00;color:#111;border:0;border-radius:10px;padding:10px 14px;font:700 14px arial,sans-serif;cursor:pointer;-webkit-tap-highlight-color:transparent}";
         (document.head || document.documentElement).appendChild(st);
     }
 
@@ -4935,7 +5140,7 @@
             syncFsChrome();
         });
         window.addEventListener("orientationchange", function () { setTimeout(function () { relayoutGame(); syncFsChrome(); }, 200); });
-        window.addEventListener("resize", function () { syncFsChrome(); });
+        window.addEventListener("resize", function () { fillGameCanvas(); syncFsChrome(); });
         window.addEventListener("focus", function () { if (fsWanted) reenterFullscreenSoon(); });
         document.addEventListener("visibilitychange", function () {
             if (document.visibilityState === "visible" && fsWanted) reenterFullscreenSoon();
@@ -4952,10 +5157,15 @@
         loadFsFlags();
         ensureFsStyle();
         bindFsListeners();
+        installCanvasFill();
         if (!document.body) {
-            document.addEventListener("DOMContentLoaded", syncFsChrome);
+            document.addEventListener("DOMContentLoaded", function () {
+                fillGameCanvas();
+                syncFsChrome();
+            });
             return;
         }
+        fillGameCanvas();
         syncFsChrome();
     }
 
@@ -7660,17 +7870,17 @@
     });
     bind("i_gx_video_shutdown", shutdownVideos);
 })(typeof globalThis !== "undefined" ? globalThis : window);
-D:\GMTEMP-LTS\GMS2TEMP\PhigrosLoader-sample_571E5A96_YYC\resource\defaultnotes_0.yytex
-D:\GMTEMP-LTS\GMS2TEMP\PhigrosLoader-sample_571E5A96_YYC\resource\defaultnotes_1.yytex
-D:\GMTEMP-LTS\GMS2TEMP\PhigrosLoader-sample_571E5A96_YYC\resource\defaultnotes_2.yytex
-D:\GMTEMP-LTS\GMS2TEMP\PhigrosLoader-sample_571E5A96_YYC\resource\audiogroup_hitsounds.dat
+D:\GMTEMP-LTS\GMS2TEMP\PhigrosLoader-sample_634736B0_YYC\resource\defaultnotes_0.yytex
+D:\GMTEMP-LTS\GMS2TEMP\PhigrosLoader-sample_634736B0_YYC\resource\defaultnotes_1.yytex
+D:\GMTEMP-LTS\GMS2TEMP\PhigrosLoader-sample_634736B0_YYC\resource\defaultnotes_2.yytex
+D:\GMTEMP-LTS\GMS2TEMP\PhigrosLoader-sample_634736B0_YYC\resource\audiogroup_hitsounds.dat
 GM_HTML5_BrowserTitle@Q3JlYXRlZCB3aXRoIEdhbWVNYWtlcjpTdHVkaW8=
 GM_HTML5_BackgroundColour@IzA=
 GM_HTML5_GameWidth@MTM2Ng==
 GM_HTML5_GameHeight@NzY4
 GM_HTML5_GameFolder@aHRtbDVnYW1l
 GM_HTML5_GameFilename@UGhpZ3Jvc0xvYWRlci1zYW1wbGUudW54
-GM_HTML5_CacheBust@NjYyMTk3NTU0
+GM_HTML5_CacheBust@MTk5NzU5MDQxNA==
 GM_HTML5_InjectDisableCache@
 GM_HTML5_InjectSplashScreen@
 GM_HTML5_InjectCenterStyle@
