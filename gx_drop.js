@@ -15,15 +15,13 @@
  */
 (function (global) {
     "use strict";
-    global.__plsGxDropLoaded30 = 1;
-    global.__plsGxDropLoaded29 = 1;
-    if (global.__plsGxDropLoaded31) {
-        global.__plsGxDropVer = 31;
-        try { if (typeof global.i_gx_drop_boot === "function") global.i_gx_drop_boot(); } catch (e0) {}
+    if (global.__plsGxDropLoaded35) {
+        global.__plsGxDropVer = 35;
+        try { if (typeof global.__plsGxDropReexport === "function") global.__plsGxDropReexport(); } catch (e0) {}
         return;
     }
-    global.__plsGxDropLoaded31 = 1;
-    global.__plsGxDropVer = 31;
+    global.__plsGxDropLoaded35 = 1;
+    global.__plsGxDropVer = 35;
 
     var STATUS_IDLE = 0;
     var STATUS_HOVER = 1;
@@ -437,7 +435,7 @@
             var payload = zip.subarray(dataOff, dataOff + compSize);
             var outBytes;
             if (method === 0) {
-                outBytes = payload;
+                outBytes = payload.slice();
             } else if (method === 8) {
                 outBytes = zipInflateRaw(payload);
             } else {
@@ -447,8 +445,10 @@
                 throw new Error("zip size mismatch: " + name);
             }
             if (canWrite) {
-                var roots = [destRoot];
-                if (destRoot !== "/tmp/pls/track") roots.push("/tmp/pls/track");
+                var roots = ["/tmp/pls/track"];
+                if (destRoot && destRoot !== "/tmp/pls/track" && destRoot.indexOf("/tmp/pls") === 0) {
+                    roots.unshift(destRoot);
+                }
                 var ri;
                 for (ri = 0; ri < roots.length; ri++) {
                     var outPath = roots[ri] + "/" + name;
@@ -492,22 +492,36 @@
         return u8[0] === 0x50 && u8[1] === 0x4b && (u8[2] === 0x03 || u8[2] === 0x05 || u8[2] === 0x07);
     }
 
-    function storeExtracted(name, bytes) {
-        if (!name || !bytes || !bytes.length) return;
-        if (isMediaFileName(name)) return;
-        if (bytes.length > 2 * 1024 * 1024) return;
-        if (!isChartTextName(name) && bytes.length > 256 * 1024) return;
-        var rel = String(name).replace(/\\/g, "/");
+    function rememberExtractedName(name) {
+        var rel = String(name || "").replace(/\\/g, "/");
         while (rel.charAt(0) === "/") rel = rel.slice(1);
-        if (!rel) return;
-        if (!extractedFiles[rel]) extractedList.push(rel);
-        extractedFiles[rel] = bytes;
-        extractedFiles[rel.toLowerCase()] = bytes;
+        if (!rel) return "";
+        if (extractedList.indexOf(rel) < 0) extractedList.push(rel);
+        return rel;
+    }
+
+    function storeExtracted(name, bytes) {
+        var rel = rememberExtractedName(name);
+        if (!rel || !bytes || !bytes.length) return;
+        var copy = bytes.slice();
+        extractedFiles[rel] = copy;
+        extractedFiles[rel.toLowerCase()] = copy;
         var base = rel.split("/").pop();
         if (base) {
-            extractedFiles[base] = bytes;
-            extractedFiles[base.toLowerCase()] = bytes;
+            extractedFiles[base] = copy;
+            extractedFiles[base.toLowerCase()] = copy;
         }
+    }
+
+    function isImportedZipPath(src) {
+        if (!importedZipBytes || importedZipBytes.length < 22) return false;
+        var p = toStr(src).replace(/\\/g, "/");
+        if (!p) return false;
+        var lower = p.toLowerCase();
+        var ip = toStr(state.importedPath).replace(/\\/g, "/").toLowerCase();
+        if (ip && (lower === ip || lower.split("/").pop() === ip.split("/").pop())) return true;
+        if (/\.(zip|pez)$/i.test(lower)) return true;
+        return false;
     }
 
     function lookupExtracted(raw) {
@@ -537,19 +551,9 @@
         var dest = toStr(destRaw).replace(/\\/g, "/");
         while (dest.length > 1 && dest.charAt(dest.length - 1) === "/") dest = dest.slice(0, -1);
         var destLower = dest.toLowerCase();
-        if (destLower.indexOf("/_savedata") === 0 || destLower.indexOf("/savedata") === 0) {
+        if (!dest || destLower.indexOf("/_savedata") === 0 || destLower.indexOf("/savedata") === 0 || destLower.indexOf("/tmp/pls") !== 0) {
             dest = "/tmp/pls/track";
             destLower = dest;
-        }
-        var allowed = destLower.indexOf("/tmp/pls") === 0
-            || destLower.indexOf("/_savedata/track") === 0
-            || destLower.indexOf("/savedata/track") === 0
-            || destLower.indexOf("/_savedata/") === 0
-            || destLower.indexOf("/savedata/") === 0
-            || /\/track$/i.test(dest);
-        if (!src || !dest || !allowed) {
-            lastUnzipError = "unzip dest not allowed dest=" + dest;
-            return 0;
         }
         var fs = getFS();
         var zip = null;
@@ -575,7 +579,6 @@
                 lastUnzipError = lastUnzipError || "unzip wrote 0 files";
                 return 0;
             }
-            dropHeavyZipBytes();
             try { console.log("[pls-gx] unzip ok n=" + lastUnzipCount + " dest=" + dest + " mem=" + extractedList.length); } catch (eLog) {}
             return lastUnzipCount;
         } catch (err) {
@@ -590,13 +593,15 @@
         var root = toStr(raw).replace(/\\/g, "/");
         while (root.length > 1 && root.charAt(root.length - 1) === "/") root = root.slice(0, -1);
         var lower = root.toLowerCase();
-        var allowed = lower.indexOf("/tmp/pls") === 0
+        var allowed = !root
+            || lower.indexOf("/tmp/pls") === 0
             || lower.indexOf("/_savedata/track") === 0
             || lower.indexOf("/savedata/track") === 0
             || lower.indexOf("/_savedata/charts") === 0
             || lower.indexOf("/savedata/charts") === 0
-            || /\/track$/i.test(root);
-        if (!root || !allowed) return 0;
+            || /\/track$/i.test(root)
+            || extractedList.length > 0;
+        if (!allowed) return 0;
         var files = [];
         var fs = getFS();
         function walk(dir, rel) {
@@ -655,6 +660,7 @@
                 }
             }
         }
+        if ((!bytes || !bytes.length) && isImportedZipPath(src)) bytes = importedZipBytes;
         if (!bytes || !bytes.length) return 0;
         readFileBytes = bytes;
         if (bytes.length <= 2 * 1024 * 1024 && !isMediaFileName(src)) state.bytes = bytes;
@@ -1239,28 +1245,35 @@
         var canvas = document.getElementById("canvas");
         if (!canvas) return;
         var vp = viewportCssSize();
-        var key = Math.round(vp.w) + "x" + Math.round(vp.h) + "@" + Math.round(vp.x) + "," + Math.round(vp.y);
+        var cssW = Math.max(1, Math.round(vp.w));
+        var cssH = Math.max(1, Math.round(vp.h));
+        var key = cssW + "x" + cssH + "@" + Math.round(vp.x) + "," + Math.round(vp.y) + ":" + canvas.width + "x" + canvas.height;
         try {
-            window.startingWidth = vp.w;
-            window.startingHeight = vp.h;
-            window.startingAspect = vp.w / Math.max(1, vp.h);
+            window.startingWidth = cssW;
+            window.startingHeight = cssH;
+            window.startingAspect = cssW / cssH;
         } catch (e0) {}
         if (canvasFillLast === key) return;
         canvasFillApplying = 1;
         try {
             canvasFillLast = key;
             try { canvas.classList.remove("animatedSizeTransitions"); } catch (e1) {}
-            canvas.style.width = vp.w + "px";
-            canvas.style.height = vp.h + "px";
+            canvas.style.width = cssW + "px";
+            canvas.style.height = cssH + "px";
             canvas.style.margin = "0px";
             canvas.style.padding = "0px";
             canvas.style.maxWidth = "none";
             canvas.style.maxHeight = "none";
             canvas.style.position = "fixed";
-            canvas.style.left = vp.x + "px";
-            canvas.style.top = vp.y + "px";
+            canvas.style.left = Math.round(vp.x) + "px";
+            canvas.style.top = Math.round(vp.y) + "px";
             canvas.style.right = "auto";
             canvas.style.bottom = "auto";
+            var loading = (canvas.width === 300 && canvas.height === 150);
+            if (!loading && (Math.abs(canvas.width - cssW) > 2 || Math.abs(canvas.height - cssH) > 2)) {
+                canvas.width = cssW;
+                canvas.height = cssH;
+            }
         } catch (e2) {
         } finally {
             canvasFillApplying = 0;
@@ -1517,26 +1530,54 @@
         } catch (e1) {}
     }
 
+    function scheduleUiBoot() {
+        if (global.__plsUiBootScheduled) return;
+        global.__plsUiBootScheduled = 1;
+        var n = 0;
+        function go() {
+            if (global.__plsUiBooted) return;
+            global.__plsUiBooted = 1;
+            try { uninstallStaleCaches(); } catch (e0) {}
+            try { installFsUi(); } catch (e1) {}
+        }
+        function wait() {
+            n++;
+            try {
+                var c = document.getElementById("canvas");
+                if (c && c.classList && c.classList.contains("active")) {
+                    go();
+                    return;
+                }
+            } catch (e2) {}
+            if (n >= 40) {
+                go();
+                return;
+            }
+            setTimeout(wait, 50);
+        }
+        setTimeout(wait, 0);
+    }
+
     function boot() {
         if (typeof document === "undefined") return 0;
-        uninstallStaleCaches();
-        installFsUi();
-        wipePersistedCharts();
-        hideOverlayFileInput();
-        dropLayer();
-        patchPause();
-        exportDropApi();
-        reexportVideo();
-        reexportShader();
-        if (booted) return 1;
-        booted = 1;
-        window.addEventListener("focus", onReturnFromDialog);
-        window.addEventListener("pageshow", onReturnFromDialog);
-        document.addEventListener("visibilitychange", function () {
-            if (document.visibilityState === "visible") onReturnFromDialog();
-        }, true);
-        interceptDownloadTabs();
-        listenImportChannel();
+        try {
+            exportDropApi();
+            if (booted) return 1;
+            booted = 1;
+            hideOverlayFileInput();
+            dropLayer();
+            patchPause();
+            reexportVideo();
+            reexportShader();
+            interceptDownloadTabs();
+            listenImportChannel();
+            window.addEventListener("focus", onReturnFromDialog);
+            window.addEventListener("pageshow", onReturnFromDialog);
+            document.addEventListener("visibilitychange", function () {
+                if (document.visibilityState === "visible") onReturnFromDialog();
+            }, true);
+            scheduleUiBoot();
+        } catch (eBoot) {}
         return 1;
     }
 
@@ -2069,7 +2110,12 @@
         var k = toStr(key);
         if (k === "pls-r:mode" || k === "pls-f:mode") return isRemoteMode() ? "1" : "0";
         if (k === "pls-f:drop") return dropLayerOpen ? "1" : "0";
+        if (k === "pls-f:vw" || k === "pls-f:vh") {
+            var vp = viewportCssSize();
+            return String(Math.max(1, Math.round(k === "pls-f:vw" ? vp.w : vp.h)));
+        }
         if (k === "pls-f:path") return state.importedPath || "";
+        if (k === "pls-f:zipn") return String((importedZipBytes && importedZipBytes.length) || (state.bytes && state.bytes.length) || 0);
         if (k === "pls-f:unziperr") return lastUnzipError || "";
         if (k === "pls-f:unzipn") return String(lastUnzipCount || 0);
         if (k === "pls-f:list") return lastListText || "";
@@ -2097,7 +2143,6 @@
         }
     };
     global.i_gx_drop_boot = function () { return boot(); };
-    try { installFsUi(); } catch (eFs) {}
     global.i_gx_drop_set_enabled = function (value) { boot(); return setEnabled(toNum(value) > 0); };
     global.i_gx_import_url = function () {
         return importPageUrl();
@@ -2131,13 +2176,18 @@
     global.i_gx_drop_hover = function () { return state.hover ? 1 : 0; };
     global.i_gx_drop_filename = function () { return state.name || ""; };
     global.i_gx_drop_error = function () { return state.error || ""; };
-    global.i_gx_drop_size = function () { return state.bytes ? state.bytes.length : 0; };
+    global.i_gx_drop_size = function () {
+        if (state.bytes && state.bytes.length) return state.bytes.length;
+        return (importedZipBytes && importedZipBytes.length) || 0;
+    };
     global.i_gx_drop_chunk = function (offset, length) {
-        if (!state.bytes) return "";
+        var src = (readFileBytes && readFileBytes.length) ? readFileBytes
+            : ((state.bytes && state.bytes.length) ? state.bytes : importedZipBytes);
+        if (!src) return "";
         var start = Math.max(0, toNum(offset) | 0);
         var count = Math.max(0, toNum(length) | 0);
-        if (count <= 0 || start >= state.bytes.length) return "";
-        return bytesToBase64(state.bytes.subarray(start, Math.min(state.bytes.length, start + count)));
+        if (count <= 0 || start >= src.length) return "";
+        return bytesToBase64(src.subarray(start, Math.min(src.length, start + count)));
     };
     global.i_gx_drop_import = function (path) {
         var fileUi = fileUiRpcNum(path);
@@ -2148,8 +2198,15 @@
         if (shader !== null) return shader;
         var rpc = videoRpcNum(path);
         if (rpc !== null) return rpc;
-        if (!state.bytes) return 0;
+        var zip = (state.bytes && state.bytes.length) ? state.bytes : importedZipBytes;
+        if (!zip || !zip.length) return 0;
         var dest = toStr(path).replace(/\\/g, "/");
+        var destLower = dest.toLowerCase();
+        if (!dest || destLower.indexOf("/_savedata") === 0 || destLower.indexOf("/savedata") === 0) {
+            dest = "/tmp/pls/charts/" + (dest.split("/").pop() || state.name || "chart.zip");
+        }
+        state.importedPath = dest.charAt(0) === "/" ? dest : "/" + dest;
+        rememberImportedZip(zip);
         var fs = getFS();
         try {
             if (fs && typeof fs.writeFile === "function") {
@@ -2158,21 +2215,42 @@
                 if (folder && typeof fs.mkdirTree === "function") {
                     try { fs.mkdirTree(folder); } catch (e1) {}
                 }
-                fs.writeFile(dest, state.bytes);
-                return 1;
+                fs.writeFile(dest, zip);
             }
         } catch (err) {}
-        return 0;
+        return 1;
     };
     global.i_gx_drop_reset = function () {
         state.status = STATUS_IDLE;
         state.hover = 0;
-        state.name = "";
         state.error = "";
         state.bytes = null;
-        state.importedPath = "";
+        state.importedPath = state.importedPath || "";
         return 1;
     };
+    var liveQueryGet = global.i_gx_query_get;
+    var liveDropImport = global.i_gx_drop_import;
+    var liveDropReset = global.i_gx_drop_reset;
+    var liveDropSize = global.i_gx_drop_size;
+    var liveDropChunk = global.i_gx_drop_chunk;
+    var liveDropStatus = global.i_gx_drop_status;
+    var liveDropFilename = global.i_gx_drop_filename;
+    global.__plsGxDropReexport = function () {
+        global.i_gx_query_get = liveQueryGet;
+        global.i_gx_drop_import = liveDropImport;
+        global.i_gx_drop_reset = liveDropReset;
+        global.i_gx_drop_size = liveDropSize;
+        global.i_gx_drop_chunk = liveDropChunk;
+        global.i_gx_drop_status = liveDropStatus;
+        global.i_gx_drop_filename = liveDropFilename;
+        exportDropApi();
+    };
+    global.__plsGxDropLoaded34 = 1;
+    global.__plsGxDropLoaded33 = 1;
+    global.__plsGxDropLoaded32 = 1;
+    global.__plsGxDropLoaded31 = 1;
+    global.__plsGxDropLoaded30 = 1;
+    global.__plsGxDropLoaded29 = 1;
     exportDropApi();
 
     (function installGxVideo(g) {
@@ -3413,9 +3491,6 @@
     })(global);
 
     if (typeof document !== "undefined") {
-        if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
-        else boot();
-        setTimeout(boot, 0);
-        setTimeout(boot, 500);
+        setTimeout(function () { try { boot(); } catch (eBoot2) {} }, 0);
     }
 })(typeof window !== "undefined" ? window : this);

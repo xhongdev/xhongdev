@@ -5,20 +5,20 @@ const loadGame = () => {
   document.head.appendChild(script);
 };
 
-const dropStaleWorker = async () => {
+// wait till SW is ready to handle fetch
+const loadSW = async () => {
   try {
-    if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) {
-      const regs = await navigator.serviceWorker.getRegistrations();
-      await Promise.all(regs.map((reg) => reg.unregister()));
-    }
-  } catch (e0) {}
-  try {
-    if (window.caches && caches.keys) {
-      const keys = await caches.keys();
-      await Promise.all(keys.map((key) => caches.delete(key)));
-    }
-  } catch (e1) {}
-  loadGame();
+    await navigator.serviceWorker.register("sw.js");
+    await navigator.serviceWorker.ready;
+
+    loadGame();
+  } catch (e) {
+    console.error(e);
+
+    loadGame();
+  }
 };
 
-window.addEventListener("load", dropStaleWorker);
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", loadSW);
+}

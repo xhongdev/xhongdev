@@ -861,11 +861,11 @@
 
       function manifestFilesMD5()
       {
-        return [ "475a76480450d034b2deeaac65029e6e",
-"ceaea093beec30425792d19a85d4bf6c",
+        return [ "03a918d86cca1a4a4e09a7b8e19ca08d",
+"a363d8fed4d06651e2f33ecd3f3d8842",
 "75c903bf646e818d4412f60c78789a22",
-"8db01bc91ad40e97bb4c6ac7695315d7",
-"99620f8d5b602e6cb695dfc7ba5a87f7",
+"1579d9fb73ecf65a89678878479b4211",
+"78325a288a66a1f3ed97ca47a53a4b5f",
 "6ca6e81b3799a92f7ecd283791ab3c3f",
 "5b77717b89945664345ae8fe5d7bd669",
 "1a128d836ac9ebe2676b84c133396a05",
@@ -971,24 +971,20 @@
         startingWidth = maxWidth;
         startingHeight = maxHeight;
         startingAspect = maxWidth / Math.max(1, maxHeight);
-        var newHeight, newWidth;
-
-        // Find the limiting dimension.
-        var heightQuotient = startingHeight / maxHeight;
-        var widthQuotient = startingWidth / maxWidth;
-
-        if (heightQuotient > widthQuotient) {
-          // Max out on height.
-          newHeight = maxHeight;
-          newWidth = newHeight * startingAspect;
-        } else {
-          // Max out on width.
-          newWidth = maxWidth;
-          newHeight = newWidth / startingAspect;
-        }
-
+                var newWidth = maxWidth;
+        var newHeight = maxHeight;
         canvasElement.style.height = newHeight + "px";
         canvasElement.style.width = newWidth + "px";
+        canvasElement.style.margin = "0px";
+        canvasElement.style.position = "fixed";
+        canvasElement.style.left = "0px";
+        canvasElement.style.top = "0px";
+        if (!(canvasElement.width === 300 && canvasElement.height === 150)) {
+          var bw = Math.max(1, Math.round(newWidth));
+          var bh = Math.max(1, Math.round(newHeight));
+          if (Math.abs(canvasElement.width - bw) > 2) canvasElement.width = bw;
+          if (Math.abs(canvasElement.height - bh) > 2) canvasElement.height = bh;
+        }
       }
 
       function pause() { // Don't change the name - GX Mobile calls it when the app becomes inactive.
@@ -1572,10 +1568,10 @@
       }
     </script>
     <script id="pls-gx-idb-boot">
-(function(){try{if(navigator.serviceWorker&&navigator.serviceWorker.getRegistrations){navigator.serviceWorker.getRegistrations().then(function(rs){for(var i=0;i<(rs||[]).length;i++)rs[i].unregister();});}}catch(e0){}try{if(window.caches&&caches.keys){caches.keys().then(function(keys){for(var i=0;i<(keys||[]).length;i++)caches.delete(keys[i]);});}}catch(e1){}function wipe(need){try{localStorage.setItem("plsIdbWipe31","1");}catch(e2){}if(!need)return;try{var req=indexedDB.deleteDatabase("/_savedata");var done=0;function go(){if(done)return;done=1;try{location.reload();}catch(e3){}}req.onsuccess=go;req.onblocked=function(){setTimeout(go,400);};setTimeout(go,1500);}catch(e4){}}try{if(localStorage.getItem("plsIdbWipe31")==="1")return;}catch(e5){}try{if(indexedDB.databases){indexedDB.databases().then(function(dbs){var need=false;for(var i=0;i<(dbs||[]).length;i++){var n=dbs[i]&&dbs[i].name;if(n==="/_savedata"||n==="IDBFS")need=true;}wipe(need);}).catch(function(){wipe(true);});}else wipe(true);}catch(e6){wipe(true);}})();
+(function(){try{if(navigator.serviceWorker&&navigator.serviceWorker.getRegistrations){navigator.serviceWorker.getRegistrations().then(function(rs){for(var i=0;i<(rs||[]).length;i++)rs[i].unregister();});}}catch(e0){}try{if(window.caches&&caches.keys){caches.keys().then(function(keys){for(var i=0;i<(keys||[]).length;i++)caches.delete(keys[i]);});}}catch(e1){}try{indexedDB.deleteDatabase("/_savedata");}catch(e2){}})();
 </script>
     <script id="pls-gx-drop-boot">
-(function(){try{window.__plsGxDropLoaded30=1;window.__plsGxDropLoaded29=1;}catch(e0){}function add(src,cb){var s=document.createElement("script");s.src=src;s.async=false;if(cb)s.onload=cb;(document.head||document.documentElement).appendChild(s);}function load(){if(window.__plsGxDropVer>=31){if(window.i_gx_drop_boot)window.i_gx_drop_boot();return;}add("gx_drop.js?v=gxdrop31",function(){if(window.i_gx_drop_boot)window.i_gx_drop_boot();});add("gx_video_boot.js?v=gxvideo9");}if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",load);else load();})();
+(function(){function add(src){var s=document.createElement("script");s.src=src;s.async=true;(document.head||document.documentElement).appendChild(s);}add("gx_drop.js?v=gxdrop35");add("gx_video_boot.js?v=gxvideo9");})();
 </script>
     <script id="pls-gx-fs-boot">
 (function(){function mobile(){try{if(window.matchMedia&&(matchMedia("(pointer:coarse)").matches||matchMedia("(hover:none)").matches))return true;}catch(e){}return("ontouchstart"in window)||Math.min(innerWidth,innerHeight)<=920||innerHeight>innerWidth*1.05;}try{if(sessionStorage.getItem("plsFsGateDone")==="1")return;}catch(e0){}if(!mobile())return;if(document.getElementById("pls-gx-fs-gate"))return;var st=document.createElement("style");st.id="pls-gx-fs-style";st.textContent="html,body{margin:0;background:#060612;overflow:hidden;height:100%;height:100dvh;width:100%;min-width:0;min-height:0}#pls-gx-fs-gate{position:fixed;inset:0;z-index:2147483646;background:#060612;color:#eee;display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:arial,sans-serif;text-align:center;padding:24px;-webkit-tap-highlight-color:transparent}#pls-gx-fs-gate p{opacity:.85;margin:0 0 22px;line-height:1.55;font-size:1.02rem}#pls-gx-fs-gate b{display:inline-block;background:#bdff00;color:#111;border-radius:12px;padding:14px 28px;font-size:1.05rem}";(document.head||document.documentElement).appendChild(st);var g=document.createElement("div");g.id="pls-gx-fs-gate";g.lang="en-US";g.innerHTML="<p>Rotate to landscape.<br>Tap fullscreen before playing.</p><b>Fullscreen</b>";function go(ev){if(ev)ev.preventDefault();var el=document.documentElement;var fn=el.requestFullscreen||el.webkitRequestFullscreen||el.webkitRequestFullScreen;function done(){try{sessionStorage.setItem("plsFsWanted","1");sessionStorage.setItem("plsFsGateDone","1");}catch(e5){}try{var o=screen.orientation;if(o&&o.lock)o.lock("landscape").catch(function(){});}catch(e){}if(g.parentNode)g.parentNode.removeChild(g);try{var w=innerWidth,h=innerHeight;if(window.visualViewport&&visualViewport.width>1){w=visualViewport.width;h=visualViewport.height;}startingWidth=w;startingHeight=h;startingAspect=w/Math.max(1,h);}catch(e6){}try{if(typeof ensureAspectRatio==="function")ensureAspectRatio();}catch(e2){}try{window.dispatchEvent(new Event("resize"));}catch(e3){}}try{var p=fn?fn.call(el,{navigationUI:"hide"}):null;if(p&&p.then)p.then(done).catch(done);else done();}catch(e4){done();}}g.addEventListener("click",go,true);function put(){(document.body||document.documentElement).appendChild(g);}if(document.body)put();else document.addEventListener("DOMContentLoaded",put);})();
