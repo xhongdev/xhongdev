@@ -1926,6 +1926,7 @@
     function makeAudioEl(src, objectUrl) {
         var el = new Audio();
         el.preload = "auto";
+        try { el.playbackRate = 1; el.defaultPlaybackRate = 1; } catch (eRate) {}
         try { el.crossOrigin = "anonymous"; } catch (e0) {}
         el.src = src;
         if (objectUrl) el.__plsObjectUrl = objectUrl;

@@ -1926,6 +1926,7 @@
     function makeAudioEl(src, objectUrl) {
         var el = new Audio();
         el.preload = "auto";
+        try { el.playbackRate = 1; el.defaultPlaybackRate = 1; } catch (eRate) {}
         try { el.crossOrigin = "anonymous"; } catch (e0) {}
         el.src = src;
         if (objectUrl) el.__plsObjectUrl = objectUrl;
@@ -3497,11 +3498,14 @@
 /**
  * GX.games audio boot. Inlined into runner HTML so OGG playback does not
  * depend on gx_drop.js resolving next to runner.html.
+ *
+ * gxaudio11: AudioContext sample clock, HTML Audio wall-clock interpolation.
  */
 (function (g) {
     "use strict";
-    if (!g || g.__plsAudioBoot) return;
-    g.__plsAudioBoot = 1;
+    if (!g) return;
+    if (typeof g.__plsAudioBoot === "number" && g.__plsAudioBoot >= 11) return;
+    g.__plsAudioBoot = 11;
     function bind(name, fn) {
         g[name] = fn;
         try { if (typeof Da !== "undefined" && Da) Da[name] = fn; } catch (e0) {}
@@ -3512,6 +3516,26 @@
     var slots = {};
     var lastErr = "";
     var pageHidden = 0;
+    function isBackground() {
+        try {
+            if (typeof document !== "undefined") {
+                if (document.hidden) return 1;
+                if (document.visibilityState === "hidden") return 1;
+            }
+        } catch (e0) {}
+        try {
+            if (typeof document !== "undefined" && typeof document.hasFocus === "function" && !document.hasFocus()) return 1;
+        } catch (e1) {}
+        return 0;
+    }
+    function lockRate(el) {
+        if (!el) return;
+        try { el.playbackRate = 1; } catch (e0) {}
+        try { el.defaultPlaybackRate = 1; } catch (e1) {}
+        try { if ("preservesPitch" in el) el.preservesPitch = true; } catch (e2) {}
+        try { if ("mozPreservesPitch" in el) el.mozPreservesPitch = true; } catch (e3) {}
+        try { if ("webkitPreservesPitch" in el) el.webkitPreservesPitch = true; } catch (e4) {}
+    }
     function AC() {
         try {
             if (!ctx) {
@@ -3520,9 +3544,11 @@
                     lastErr = "no AudioContext";
                     return null;
                 }
-                ctx = new C();
+                try { ctx = new C({ latencyHint: "playback" }); } catch (eHint) {
+                    ctx = new C();
+                }
             }
-            if (ctx.state === "suspended") ctx.resume();
+            if (ctx.state === "suspended" && !pageHidden && !isBackground()) ctx.resume();
             return ctx;
         } catch (e) {
             lastErr = "AudioContext failed";
@@ -3530,13 +3556,14 @@
         }
     }
     function unlock() {
+        if (pageHidden || isBackground()) return;
         AC();
         var ids = Object.keys(slots);
         for (var i = 0; i < ids.length; i++) {
             var s = slots[ids[i]];
             if (!s) continue;
-            if (pageHidden) continue;
             if (s.el && s.want) {
+                lockRate(s.el);
                 var p = s.el.play();
                 if (p && p.catch) p.catch(function () {});
             } else if (s.want && s.buffer && !s.playing) {
@@ -3564,7 +3591,12 @@
             var s = slots[ids[i]];
             if (!s) continue;
             if (s.el) {
-                try { s.el.pause(); } catch (e0) {}
+                try {
+                    var hiddenPos = posOf(s);
+                    lockRate(s.el);
+                    s.el.pause();
+                    pinClock(s, hiddenPos);
+                } catch (e0) {}
             } else {
                 s.off = posOf(s);
                 s.playing = 0;
@@ -3576,23 +3608,39 @@
         }
     }
     function onPageHidden(hidden) {
-        pageHidden = hidden ? 1 : 0;
+        hidden = hidden ? 1 : 0;
+        pageHidden = hidden;
         if (hidden) pauseAll();
         else if (ctx && ctx.state === "suspended") {
             try { ctx.resume(); } catch (e2) {}
         }
     }
+    function syncBackground() {
+        var bg = isBackground();
+        if (bg) {
+            if (!pageHidden) onPageHidden(1);
+            else pauseAll();
+        } else if (pageHidden) {
+            onPageHidden(0);
+        }
+        return bg;
+    }
     if (typeof document !== "undefined") {
         document.addEventListener("visibilitychange", function () {
-            onPageHidden(!!document.hidden);
+            onPageHidden(isBackground());
         }, true);
         document.addEventListener("pagehide", function () { onPageHidden(true); }, true);
-        document.addEventListener("pageshow", function () { onPageHidden(false); }, true);
+        document.addEventListener("pageshow", function () { onPageHidden(isBackground()); }, true);
         document.addEventListener("freeze", function () { onPageHidden(true); }, true);
-        document.addEventListener("resume", function () { onPageHidden(false); }, true);
+        document.addEventListener("resume", function () { onPageHidden(isBackground()); }, true);
         document.addEventListener("pointerdown", unlock, true);
         document.addEventListener("keydown", unlock, true);
     }
+    if (typeof window !== "undefined") {
+        window.addEventListener("blur", function () { onPageHidden(true); }, true);
+        window.addEventListener("focus", function () { onPageHidden(isBackground()); }, true);
+    }
+    try { if (isBackground()) onPageHidden(true); } catch (eInit) {}
     function b64u8(b64) {
         var bin = atob(String(b64 || ""));
         var u = new Uint8Array(bin.length);
@@ -3605,8 +3653,48 @@
         try { s.src.disconnect(); } catch (e1) {}
         s.src = null;
     }
+    function wallSec() {
+        try {
+            if (typeof performance !== "undefined" && performance.now) return performance.now() * 0.001;
+        } catch (e0) {}
+        return Date.now() * 0.001;
+    }
+    function pinClock(s, sec) {
+        if (!s) return;
+        if (!(sec >= 0)) sec = 0;
+        s.clockMedia = sec;
+        s.clockWall = wallSec();
+        s.clockEst = sec;
+    }
+    function posEl(s) {
+        var el = s.el;
+        var media = el.currentTime || 0;
+        if (media < 0) media = 0;
+        if (el.paused || el.ended) {
+            pinClock(s, media);
+            return media;
+        }
+        var wall = wallSec();
+        if (s.clockWall === undefined) {
+            pinClock(s, media);
+            return media;
+        }
+        var jumped = media < s.clockMedia - 0.02 || media > (s.clockEst || media) + 0.08;
+        if (jumped || media > s.clockMedia + 0.0005) {
+            pinClock(s, media);
+            return media;
+        }
+        var est = s.clockMedia + (wall - s.clockWall);
+        if (s.clockEst !== undefined && est < s.clockEst) est = s.clockEst;
+        if (est > s.clockMedia + 0.08) est = s.clockMedia + 0.08;
+        if (s.dur && est > s.dur) est = s.dur;
+        if (est < 0) est = 0;
+        s.clockEst = est;
+        return est;
+    }
     function posOf(s) {
         if (!s) return 0;
+        if (s.el) return posEl(s);
         if (!s.playing || !ctx) return s.off || 0;
         var p = (s.off || 0) + (ctx.currentTime - s.t0);
         if (s.dur && p > s.dur) p = s.dur;
@@ -3618,9 +3706,14 @@
             s.want = 1;
             return 1;
         }
+        if (pageHidden || isBackground()) {
+            s.want = 1;
+            return 1;
+        }
         stopSrc(s);
         var src = c.createBufferSource();
         src.buffer = s.buffer;
+        try { src.playbackRate.value = 1; } catch (eRate) {}
         src.connect(c.destination);
         s.off = s.off || 0;
         try { src.start(0, s.off); } catch (e0) {
@@ -3630,6 +3723,7 @@
         s.t0 = c.currentTime;
         s.playing = 1;
         s.want = 0;
+        pinClock(s, s.off || 0);
         src.onended = function () {
             if (s.src === src) {
                 s.playing = 0;
@@ -3644,16 +3738,19 @@
             var url = URL.createObjectURL(blob);
             var el = new Audio();
             el.preload = "auto";
+            lockRate(el);
             el.src = url;
             el.__plsObjectUrl = url;
             s.el = el;
             el.addEventListener("loadedmetadata", function () {
                 s.dur = isFinite(el.duration) ? el.duration : 0;
-                if (s.want) {
+                lockRate(el);
+                if (s.want && !pageHidden && !isBackground()) {
                     var p = el.play();
                     if (p && p.catch) p.catch(function () {});
                 }
             });
+            el.addEventListener("ratechange", function () { lockRate(el); });
             try { el.load(); } catch (e0) {}
             return 1;
         } catch (e1) {
@@ -3662,10 +3759,16 @@
         }
     }
     function decodeU8(s, u8, mime) {
+        // BufferSource + AudioContext.currentTime is sample-accurate
+        // (~1/sampleRate, ~21µs at 48 kHz) and not tied to rAF. HTML Audio
+        // is the fallback; its playhead is interpolated with performance.now.
         var c = AC();
+        function failDecode() {
+            lastErr = "ogg decode failed";
+            attachEl(s, u8, mime);
+        }
         if (!c) return attachEl(s, u8, mime);
         var ab = u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength);
-        var ok = 1;
         try {
             var p = c.decodeAudioData(ab);
             if (p && p.then) {
@@ -3673,10 +3776,7 @@
                     s.buffer = buf;
                     s.dur = buf.duration || 0;
                     if (s.want) playBuf(s);
-                }).catch(function () {
-                    lastErr = "ogg decode failed";
-                    attachEl(s, u8, mime);
-                });
+                }).catch(failDecode);
                 return 1;
             }
         } catch (e0) {}
@@ -3685,14 +3785,11 @@
                 s.buffer = buf;
                 s.dur = buf.duration || 0;
                 if (s.want) playBuf(s);
-            }, function () {
-                lastErr = "ogg decode failed";
-                attachEl(s, u8, mime);
-            });
+            }, failDecode);
+            return 1;
         } catch (e1) {
-            ok = attachEl(s, u8, mime);
+            return attachEl(s, u8, mime);
         }
-        return ok;
     }
     bind("i_gx_audio_begin", function (mime) {
         lastErr = "";
@@ -3751,11 +3848,19 @@
     bind("i_gx_audio_play", function (id) {
         var s = slots[id | 0];
         if (!s) return 0;
+        if (pageHidden || isBackground()) {
+            s.want = 1;
+            return 1;
+        }
         if (s.el) {
+            lockRate(s.el);
+            if (!s.el.paused && !s.el.ended) return 1;
+            pinClock(s, s.el.currentTime || 0);
             var p = s.el.play();
             if (p && p.catch) p.catch(function () {});
             return 1;
         }
+        if (s.playing) return 1;
         s.want = 1;
         return playBuf(s);
     });
@@ -3763,22 +3868,36 @@
         var s = slots[id | 0];
         if (!s) return 0;
         if (s.el) {
+            var elPos = posOf(s);
+            lockRate(s.el);
             s.el.pause();
+            pinClock(s, elPos);
+            try { s.el.currentTime = elPos; } catch (ePause) {}
             return 1;
         }
         s.off = posOf(s);
         s.playing = 0;
+        s.want = 0;
+        pinClock(s, s.off);
         stopSrc(s);
         return 1;
     });
     bind("i_gx_audio_resume", function (id) {
         var s = slots[id | 0];
         if (!s) return 0;
+        if (pageHidden || isBackground()) {
+            s.want = 1;
+            return 1;
+        }
         if (s.el) {
+            lockRate(s.el);
+            if (!s.el.paused && !s.el.ended) return 1;
+            pinClock(s, s.el.currentTime || 0);
             var p = s.el.play();
             if (p && p.catch) p.catch(function () {});
             return 1;
         }
+        if (s.playing) return 1;
         s.want = 1;
         return playBuf(s);
     });
@@ -3788,11 +3907,13 @@
         if (s.el) {
             s.el.pause();
             try { s.el.currentTime = 0; } catch (e0) {}
+            pinClock(s, 0);
             return 1;
         }
         s.off = 0;
         s.playing = 0;
         s.want = 0;
+        pinClock(s, 0);
         stopSrc(s);
         return 1;
     });
@@ -3801,17 +3922,19 @@
         if (!s) return 0;
         var sec = Math.max(0, Number(ms) / 1000);
         if (s.el) {
+            lockRate(s.el);
             try { s.el.currentTime = sec; } catch (e0) {}
+            pinClock(s, sec);
             return 1;
         }
         s.off = sec;
+        pinClock(s, sec);
         if (s.playing) playBuf(s);
         return 1;
     });
     bind("i_gx_audio_get_position_ms", function (id) {
         var s = slots[id | 0];
         if (!s) return 0;
-        if (s.el) return (s.el.currentTime || 0) * 1000;
         return posOf(s) * 1000;
     });
     bind("i_gx_audio_get_length_ms", function (id) {
@@ -3838,7 +3961,7 @@
     });
     bind("i_gx_audio_last_error", function () { return lastErr || ""; });
     bind("i_gx_audio_ping", function () { return 1; });
-    bind("i_gx_page_hidden", function () { return pageHidden; });
+    bind("i_gx_page_hidden", function () { return syncBackground(); });
 })(typeof globalThis !== "undefined" ? globalThis : window);
 /**
  * GX.games chart import. JS extensions are not stored in the .unx; this file
@@ -5768,6 +5891,7 @@
     function makeAudioEl(src, objectUrl) {
         var el = new Audio();
         el.preload = "auto";
+        try { el.playbackRate = 1; el.defaultPlaybackRate = 1; } catch (eRate) {}
         try { el.crossOrigin = "anonymous"; } catch (e0) {}
         el.src = src;
         if (objectUrl) el.__plsObjectUrl = objectUrl;
@@ -8142,17 +8266,17 @@
     });
     bind("i_gx_video_shutdown", shutdownVideos);
 })(typeof globalThis !== "undefined" ? globalThis : window);
-D:\GMTEMP-LTS\GMS2TEMP\PhigrosLoader-sample_ADB4ABD_YYC\resource\defaultnotes_0.yytex
-D:\GMTEMP-LTS\GMS2TEMP\PhigrosLoader-sample_ADB4ABD_YYC\resource\defaultnotes_1.yytex
-D:\GMTEMP-LTS\GMS2TEMP\PhigrosLoader-sample_ADB4ABD_YYC\resource\defaultnotes_2.yytex
-D:\GMTEMP-LTS\GMS2TEMP\PhigrosLoader-sample_ADB4ABD_YYC\resource\audiogroup_hitsounds.dat
+D:\GMTEMP-LTS\GMS2TEMP\PhigrosLoader-sample_13EFDB78_YYC\resource\defaultnotes_0.yytex
+D:\GMTEMP-LTS\GMS2TEMP\PhigrosLoader-sample_13EFDB78_YYC\resource\defaultnotes_1.yytex
+D:\GMTEMP-LTS\GMS2TEMP\PhigrosLoader-sample_13EFDB78_YYC\resource\defaultnotes_2.yytex
+D:\GMTEMP-LTS\GMS2TEMP\PhigrosLoader-sample_13EFDB78_YYC\resource\audiogroup_hitsounds.dat
 GM_HTML5_BrowserTitle@Q3JlYXRlZCB3aXRoIEdhbWVNYWtlcjpTdHVkaW8=
 GM_HTML5_BackgroundColour@IzA=
 GM_HTML5_GameWidth@MTM2Ng==
 GM_HTML5_GameHeight@NzY4
 GM_HTML5_GameFolder@aHRtbDVnYW1l
 GM_HTML5_GameFilename@UGhpZ3Jvc0xvYWRlci1zYW1wbGUudW54
-GM_HTML5_CacheBust@MTI2NTU1MTYx
+GM_HTML5_CacheBust@NTM2ODQwODM4
 GM_HTML5_InjectDisableCache@
 GM_HTML5_InjectSplashScreen@
 GM_HTML5_InjectCenterStyle@
