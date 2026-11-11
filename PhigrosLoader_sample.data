@@ -7934,7 +7934,6 @@
     });
     bind("i_gx_video_shutdown", shutdownVideos);
 })(typeof globalThis !== "undefined" ? globalThis : window);
-../../../.build/gx-remote.zip
 {
   "name": "English",
   "version": "1.1.0",
@@ -8524,7 +8523,7 @@ GM_HTML5_GameWidth@MTM2Ng==
 GM_HTML5_GameHeight@NzY4
 GM_HTML5_GameFolder@aHRtbDVnYW1l
 GM_HTML5_GameFilename@UGhpZ3Jvc0xvYWRlci1zYW1wbGUudW54
-GM_HTML5_CacheBust@MjA0MTA0MjAzMQ==
+GM_HTML5_CacheBust@Mzc5NDkzOTAz
 GM_HTML5_InjectDisableCache@
 GM_HTML5_InjectSplashScreen@
 GM_HTML5_InjectCenterStyle@
