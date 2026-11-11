@@ -131,6 +131,7 @@
     }
 
     function onPageHidden(hidden) {
+        hidden = hidden || !!(g.PhiGX && g.PhiGX.suspended());
         pageHidden = hidden ? 1 : 0;
         if (hidden) pauseAll();
         else {
@@ -148,6 +149,7 @@
         document.addEventListener("visibilitychange", function () {
             onPageHidden(!!document.hidden);
         }, true);
+        document.addEventListener("pls-gx-fullscreen", function (ev) { onPageHidden(document.hidden || ev.detail.suspended); });
         document.addEventListener("pagehide", function () { onPageHidden(true); }, true);
         document.addEventListener("pageshow", function () { onPageHidden(false); }, true);
         document.addEventListener("freeze", function () { onPageHidden(true); }, true);

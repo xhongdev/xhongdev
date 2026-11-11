@@ -1,0 +1,10 @@
+# Keep generated Emscripten offsets and release hashes byte-for-byte stable.
+/*.data binary
+/*.wasm binary
+/*.unx binary
+/resource/*.yytex binary
+/resource/*.dat binary
+/*.js -text
+/*.html -text
+/*.json -text
+/*.xml -text

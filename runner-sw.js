@@ -1,6 +1,6 @@
 const loadGame = () => {
   let script = document.createElement("script");
-  script.src = "PhigrosLoader_sample.js";
+  script.src = "runner.js";
   script.async = true;
   document.head.appendChild(script);
 };

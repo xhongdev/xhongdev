@@ -15,13 +15,50 @@
  */
 (function (global) {
     "use strict";
-    if (global.__plsGxDropLoaded35) {
-        global.__plsGxDropVer = 35;
-        try { if (typeof global.__plsGxDropReexport === "function") global.__plsGxDropReexport(); } catch (e0) {}
+    if (global.__plsGxDropLoaded29) {
+        global.__plsGxDropVer = 29;
+        try { if (typeof global.i_gx_drop_boot === "function") global.i_gx_drop_boot(); } catch (e0) {}
         return;
     }
-    global.__plsGxDropLoaded35 = 1;
-    global.__plsGxDropVer = 35;
+    global.__plsGxDropLoaded29 = 1;
+    global.__plsGxDropVer = 29;
+
+    // These two bundled blur shaders use GLES 3-style indexing, but GX's
+    // native runner can request WebGL 1. Patch only their browser sources;
+    // desktop/Android assets and all unrelated shaders keep their source.
+    [global.WebGLRenderingContext, global.WebGL2RenderingContext].forEach(function (ctor) {
+        if (!ctor || ctor.prototype.__plsGXBlurCompat) return;
+        var original = ctor.prototype.shaderSource;
+        ctor.prototype.shaderSource = function (shader, source) {
+            if (source.indexOf('uniform int u_kernel_radius') >= 0 && /float\s+weights\[9\]/.test(source)) {
+                source = source.slice(0, source.indexOf('void main()'))
+                    + 'void main(){ vec2 pixel_size=vec2(1.0)/u_texture_size;'
+                    + 'int radius=int(clamp(float(u_kernel_radius),1.0,4.0)); float sigma=float(radius)*0.5;'
+                    + 'vec4 colour=vec4(0.0); float total=0.0;'
+                    + 'for(int y=-4;y<=4;y++){for(int x=-4;x<=4;x++){'
+                    + 'if(x < -radius || x > radius || y < -radius || y > radius) continue;'
+                    + 'float w=gaussian(float(x),sigma)*gaussian(float(y),sigma);'
+                    + 'colour+=texture2D(gm_BaseTexture,v_vTexcoord+vec2(float(x),float(y))*pixel_size*u_blur_amount)*w; total+=w;}}'
+                    + 'gl_FragColor=colour/max(total,0.000001);}';
+            } else if (/float\s+gaussian\[49\]/.test(source) && source.indexOf('gaussian[index]') >= 0) {
+                var weights = new Array(49);
+                source.replace(/gaussian\[(\d+)\]\s*=\s*([\d.eE+-]+)\s*;/g, function (_, index, value) {
+                    weights[Number(index)] = value;
+                    return _;
+                });
+                if (weights.every(function (value) { return typeof value === 'string'; })) {
+                    var lookup = 'float gx_weight(int i){';
+                    for (var wi = 0; wi < weights.length; wi++) lookup += 'if(i==' + wi + ')return ' + weights[wi] + ';';
+                    lookup += 'return 0.0;}';
+                    source = source.replace(/void\s+main\s*\(\s*\)\s*\{/, lookup + '\nvoid main(){');
+                    source = source.replace(/float\s+gaussian\[49\];[\s\S]*?(?=\s*vec4\s+total_color\s*=)/, '\n');
+                    source = source.replace(/gaussian\[index\]/g, 'gx_weight(index)');
+                }
+            }
+            return original.call(this, shader, source);
+        };
+        ctor.prototype.__plsGXBlurCompat = true;
+    });
 
     var STATUS_IDLE = 0;
     var STATUS_HOVER = 1;
@@ -36,6 +73,7 @@
         error: "",
         bytes: null,
         importedPath: "",
+        kind: "chart",
         enabled: 0
     };
 
@@ -48,18 +86,14 @@
     var readFileBytes = null;
     var lastReadChunk = "";
     var lastHeadText = "";
+    var MSG_UNKNOWN = 0, MSG_RUNNING = 1, MSG_DONE = 2;
+    var msgButtons = ["", "", "", ""];
+    var msgAlign = 1;
+    var msgTasks = Object.create(null);
+    var nextMsg = 1;
     var extractedFiles = {};
-    var fsWanted = 0;
-    var fsGateDone = 0;
-    var fsPicking = 0;
-    var fsUiReady = 0;
-    var canvasFillReady = 0;
-    var canvasFillApplying = 0;
-    var canvasFillLast = "";
-    var canvasFillRaf = 0;
     var extractedList = [];
     var importedZipBytes = null;
-    var mediaUrlCache = {};
 
     function isLoopbackHost() {
         try {
@@ -71,6 +105,7 @@
     }
 
     function isRemoteMode() {
+        if (global.__plsGXRemoteBuild === true) return true;
         try {
             if (window.sessionStorage && sessionStorage.getItem("plsGxRemote") === "1") return true;
         } catch (e0) {}
@@ -84,21 +119,6 @@
             if (q === "0" || q === "false" || q === "no") return false;
         } catch (e2) {}
         return !isLoopbackHost();
-    }
-
-    function dropHeavyZipBytes() {
-        importedZipBytes = null;
-        if (state.bytes && state.bytes.length > 2 * 1024 * 1024) state.bytes = null;
-    }
-
-    function isMediaFileName(name) {
-        return /\.(mp4|m4v|webm|mov|mkv|ogv|mp3|ogg|oga|wav|flac|m4a|aac|png|jpe?g|webp|gif|bmp)$/i.test(String(name || ""));
-    }
-
-    function isChartTextName(name) {
-        var n = String(name || "").toLowerCase();
-        return n.indexOf(".json") >= 0 || n.slice(-4) === ".txt" || n.slice(-4) === ".xml"
-            || n.slice(-4) === ".pec" || n.slice(-4) === ".rpe" || n.indexOf("extra") >= 0;
     }
 
     function persistFs(done) {
@@ -123,17 +143,6 @@
         });
         if (pending <= 0) finish();
         setTimeout(finish, 400);
-    }
-
-    function wipePersistedCharts() {
-        if (global.__plsWipedSavedCharts) return;
-        if (!getFS()) return;
-        global.__plsWipedSavedCharts = 1;
-        wipeFsPath("/_savedata/track");
-        wipeFsPath("/savedata/track");
-        wipeFsPath("/_savedata/charts");
-        wipeFsPath("/savedata/charts");
-        persistFs(function () {});
     }
 
     function wipeFsPath(raw) {
@@ -435,7 +444,7 @@
             var payload = zip.subarray(dataOff, dataOff + compSize);
             var outBytes;
             if (method === 0) {
-                outBytes = payload.slice();
+                outBytes = payload;
             } else if (method === 8) {
                 outBytes = zipInflateRaw(payload);
             } else {
@@ -445,9 +454,10 @@
                 throw new Error("zip size mismatch: " + name);
             }
             if (canWrite) {
-                var roots = ["/tmp/pls/track"];
-                if (destRoot && destRoot !== "/tmp/pls/track" && destRoot.indexOf("/tmp/pls") === 0) {
-                    roots.unshift(destRoot);
+                var roots = [destRoot];
+                if (/\/track\/?$/.test(destRoot)) {
+                    if (destRoot !== "/tmp/pls/track") roots.push("/tmp/pls/track");
+                    if (destRoot !== "/_savedata/track") roots.push("/_savedata/track");
                 }
                 var ri;
                 for (ri = 0; ri < roots.length; ri++) {
@@ -466,19 +476,9 @@
         return wrote;
     }
 
-    function revokeMediaUrls() {
-        var keys = Object.keys(mediaUrlCache);
-        var i;
-        for (i = 0; i < keys.length; i++) {
-            try { URL.revokeObjectURL(mediaUrlCache[keys[i]]); } catch (e0) {}
-        }
-        mediaUrlCache = {};
-    }
-
     function clearExtracted() {
         extractedFiles = {};
         extractedList = [];
-        revokeMediaUrls();
     }
 
     function rememberImportedZip(bytes) {
@@ -492,36 +492,19 @@
         return u8[0] === 0x50 && u8[1] === 0x4b && (u8[2] === 0x03 || u8[2] === 0x05 || u8[2] === 0x07);
     }
 
-    function rememberExtractedName(name) {
-        var rel = String(name || "").replace(/\\/g, "/");
-        while (rel.charAt(0) === "/") rel = rel.slice(1);
-        if (!rel) return "";
-        if (extractedList.indexOf(rel) < 0) extractedList.push(rel);
-        return rel;
-    }
-
     function storeExtracted(name, bytes) {
-        var rel = rememberExtractedName(name);
-        if (!rel || !bytes || !bytes.length) return;
-        var copy = bytes.slice();
-        extractedFiles[rel] = copy;
-        extractedFiles[rel.toLowerCase()] = copy;
+        if (!name || !bytes || !bytes.length) return;
+        var rel = String(name).replace(/\\/g, "/");
+        while (rel.charAt(0) === "/") rel = rel.slice(1);
+        if (!rel) return;
+        if (!extractedFiles[rel]) extractedList.push(rel);
+        extractedFiles[rel] = bytes;
+        extractedFiles[rel.toLowerCase()] = bytes;
         var base = rel.split("/").pop();
         if (base) {
-            extractedFiles[base] = copy;
-            extractedFiles[base.toLowerCase()] = copy;
+            extractedFiles[base] = bytes;
+            extractedFiles[base.toLowerCase()] = bytes;
         }
-    }
-
-    function isImportedZipPath(src) {
-        if (!importedZipBytes || importedZipBytes.length < 22) return false;
-        var p = toStr(src).replace(/\\/g, "/");
-        if (!p) return false;
-        var lower = p.toLowerCase();
-        var ip = toStr(state.importedPath).replace(/\\/g, "/").toLowerCase();
-        if (ip && (lower === ip || lower.split("/").pop() === ip.split("/").pop())) return true;
-        if (/\.(zip|pez)$/i.test(lower)) return true;
-        return false;
     }
 
     function lookupExtracted(raw) {
@@ -551,9 +534,15 @@
         var dest = toStr(destRaw).replace(/\\/g, "/");
         while (dest.length > 1 && dest.charAt(dest.length - 1) === "/") dest = dest.slice(0, -1);
         var destLower = dest.toLowerCase();
-        if (!dest || destLower.indexOf("/_savedata") === 0 || destLower.indexOf("/savedata") === 0 || destLower.indexOf("/tmp/pls") !== 0) {
-            dest = "/tmp/pls/track";
-            destLower = dest;
+        var allowed = destLower.indexOf("/tmp/pls") === 0
+            || destLower.indexOf("/_savedata/track") === 0
+            || destLower.indexOf("/savedata/track") === 0
+            || destLower.indexOf("/_savedata/") === 0
+            || destLower.indexOf("/savedata/") === 0
+            || /\/track$/i.test(dest);
+        if (!src || !dest || !allowed) {
+            lastUnzipError = "unzip dest not allowed dest=" + dest;
+            return 0;
         }
         var fs = getFS();
         var zip = null;
@@ -593,15 +582,13 @@
         var root = toStr(raw).replace(/\\/g, "/");
         while (root.length > 1 && root.charAt(root.length - 1) === "/") root = root.slice(0, -1);
         var lower = root.toLowerCase();
-        var allowed = !root
-            || lower.indexOf("/tmp/pls") === 0
+        var allowed = lower.indexOf("/tmp/pls") === 0
             || lower.indexOf("/_savedata/track") === 0
             || lower.indexOf("/savedata/track") === 0
             || lower.indexOf("/_savedata/charts") === 0
             || lower.indexOf("/savedata/charts") === 0
-            || /\/track$/i.test(root)
-            || extractedList.length > 0;
-        if (!allowed) return 0;
+            || /\/track$/i.test(root);
+        if (!root || !allowed) return 0;
         var files = [];
         var fs = getFS();
         function walk(dir, rel) {
@@ -646,7 +633,9 @@
         lastReadChunk = "";
         var src = toStr(raw).replace(/\\/g, "/");
         if (!src) return 0;
-        var bytes = lookupExtracted(src);
+        var fs = getFS();
+        var bytes = fs ? readFsBytes(fs, src) : null;
+        if (!bytes) bytes = lookupExtracted(src);
         if (!bytes) {
             var fs = getFS();
             if (fs) {
@@ -660,10 +649,8 @@
                 }
             }
         }
-        if ((!bytes || !bytes.length) && isImportedZipPath(src)) bytes = importedZipBytes;
         if (!bytes || !bytes.length) return 0;
         readFileBytes = bytes;
-        if (bytes.length <= 2 * 1024 * 1024 && !isMediaFileName(src)) state.bytes = bytes;
         return bytes.length;
     }
 
@@ -692,7 +679,9 @@
         }
         var take = Math.min(readFileBytes.length, 4096);
         try {
-            lastHeadText = new TextDecoder("utf-8").decode(readFileBytes.subarray(0, take));
+            var encoding = readFileBytes[0] === 255 && readFileBytes[1] === 254 ? "utf-16le"
+                : readFileBytes[0] === 254 && readFileBytes[1] === 255 ? "utf-16be" : "utf-8";
+            lastHeadText = new TextDecoder(encoding).decode(readFileBytes.subarray(0, take));
         } catch (e0) {
             var s = "";
             var i;
@@ -700,7 +689,6 @@
             lastHeadText = s;
         }
         if (lastHeadText.length > 4096) lastHeadText = lastHeadText.slice(0, 4096);
-        state.error = lastHeadText;
         try { console.log("[pls-gx] head ok n=" + lastHeadText.length + " name=" + toStr(raw).split("/").pop()); } catch (eLog) {}
         return lastHeadText.length;
     }
@@ -753,6 +741,22 @@
     function toNum(value) {
         var n = Number(value);
         return isFinite(n) ? n : 0;
+    }
+
+    function rpcUnescape(s) {
+        s = toStr(s);
+        var out = "";
+        for (var i = 0; i < s.length; i++) {
+            if (s.charAt(i) === "\\" && i + 1 < s.length) {
+                var n = s.charAt(i + 1);
+                if (n === "t") { out += "\t"; i++; continue; }
+                if (n === "n") { out += "\n"; i++; continue; }
+                if (n === "r") { out += "\r"; i++; continue; }
+                if (n === "\\") { out += "\\"; i++; continue; }
+            }
+            out += s.charAt(i);
+        }
+        return out;
     }
 
     function isPackageName(name) {
@@ -847,6 +851,10 @@
     }
 
     function unpauseGame(kickLoop) {
+        if (global.PhiGX && global.PhiGX.suspended()) {
+            if (typeof global.GM_pause === "function") global.GM_pause();
+            return;
+        }
         restoreFocus();
         try {
             var resumeFn = lookupFn("resume");
@@ -913,6 +921,7 @@
         if (!bytes || !bytes.length) return "";
         var fs = getFS();
         var paths = [
+            "/_savedata/charts/" + name,
             "/tmp/pls/charts/" + name,
             "/tmp/charts/" + name
         ];
@@ -931,10 +940,11 @@
                 } catch (e2) {}
             }
         }
-        return written || ("/tmp/pls/charts/" + name);
+        return written || ("/_savedata/charts/" + name);
     }
 
-    function takeFile(file) {
+    function takeFile(file, kind) {
+        state.kind = kind || "chart";
         exportDropApi();
         if (!file) {
             state.status = STATUS_ERROR;
@@ -1023,18 +1033,18 @@
     }
 
     function onPickChange(ev) {
-        fsPicking = 0;
         exportDropApi();
         var el = ev && ev.target;
         var file = el && el.files && el.files[0];
+        if (el && el.__plsHandledFile === file) return;
+        if (el) el.__plsHandledFile = file;
+        if (global.PhiGX) global.PhiGX.pickerReturned();
         restoreFocus();
-        if (file) takeFile(file);
+        if (file) takeFile(file, el && el.dataset.plsKind);
         else pokeUnpause();
-        reenterFullscreenSoon();
         setTimeout(function () {
             restoreFocus();
             replacePickInput();
-            reenterFullscreenSoon();
         }, 0);
     }
 
@@ -1047,16 +1057,13 @@
         el.title = "选择文件";
         el.style.cssText = "position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer;z-index:3;margin:0;padding:0;border:0;font-size:24px;";
         el.addEventListener("change", onPickChange);
-        el.addEventListener("input", onPickChange);
         el.addEventListener("cancel", function () {
-            fsPicking = 0;
+            if (global.PhiGX) global.PhiGX.pickerReturned();
             pokeUnpause();
-            reenterFullscreenSoon();
         });
         el.addEventListener("click", function (ev) {
             if (ev && ev.stopPropagation) ev.stopPropagation();
-            fsPicking = 1;
-            hideFsOverlays();
+            if (global.PhiGX) global.PhiGX.pickerOpened();
             unpauseGame(false);
         });
         return el;
@@ -1072,6 +1079,25 @@
         var el = makePickInput();
         wrap.appendChild(el);
         return el;
+    }
+
+    function setSkinPickRect(x, y, w, h, roomW, roomH) {
+        var el = document.getElementById("pls-gx-skin-file");
+        if (!el && w > 0 && h > 0) {
+            el = makePickInput();
+            el.id = "pls-gx-skin-file";
+            el.dataset.plsKind = "skin";
+            el.title = "Add note skin / 添加音符皮肤";
+            el.style.position = "fixed";
+            el.style.zIndex = "2147483644";
+            (document.body || document.documentElement).appendChild(el);
+        }
+        if (el) {
+            el.style.display = w > 0 && h > 0 ? "block" : "none";
+            if (w > 0 && h > 0) applyBox(el, roomToCss(x, y, w, h, roomW, roomH));
+            if (el.files && el.files.length && state.status === STATUS_IDLE) el.value = "";
+        }
+        return 1;
     }
 
     function dropLayer() {
@@ -1119,8 +1145,6 @@
 
     function onReturnFromDialog() {
         if (restoringFocus) return;
-        fsPicking = 0;
-        if (fsWanted) reenterFullscreenSoon();
         if (!dropLayerOpen && state.status !== STATUS_READING && state.status !== STATUS_OK) return;
         pokeUnpause();
         exportDropApi();
@@ -1151,9 +1175,6 @@
         if (dropLayerOpen) {
             replacePickInput();
             if (state.status === STATUS_IDLE) setDropVisual("点下方按钮选择 .zip / .pez 谱面包");
-            hideFsOverlays();
-        } else if (wasOpen) {
-            reenterFullscreenSoon();
         }
         return 1;
     }
@@ -1172,412 +1193,29 @@
         return 1;
     }
 
-    function isMobileView() {
-        try {
-            if (window.matchMedia && (window.matchMedia("(pointer:coarse)").matches || window.matchMedia("(hover:none)").matches)) return true;
-        } catch (e0) {}
-        if (typeof window !== "undefined" && "ontouchstart" in window) return true;
-        return Math.min(window.innerWidth || 0, window.innerHeight || 0) <= 920;
-    }
-
-    function isPortraitView() {
-        return (window.innerHeight || 0) > (window.innerWidth || 0) * 1.05;
-    }
-
-    function isStandaloneDisplay() {
-        try {
-            if (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) return true;
-        } catch (e0) {}
-        return !!(typeof navigator !== "undefined" && navigator.standalone);
-    }
-
-    function isPageFullscreen() {
-        return !!(document.fullscreenElement || document.webkitFullscreenElement || document.msFullscreenElement);
-    }
-
-    function shouldOfferFullscreen() {
-        return !isStandaloneDisplay();
-    }
-
-    function wantsBlockingGate() {
-        return isMobileView() || isPortraitView();
-    }
-
-    function loadFsFlags() {
-        try { if (sessionStorage.getItem("plsFsWanted") === "1") fsWanted = 1; } catch (e0) {}
-        try { if (sessionStorage.getItem("plsFsGateDone") === "1") fsGateDone = 1; } catch (e1) {}
-    }
-
-    function markFsWanted() {
-        fsWanted = 1;
-        try { sessionStorage.setItem("plsFsWanted", "1"); } catch (e0) {}
-    }
-
-    function markFsGateDone() {
-        fsGateDone = 1;
-        try { sessionStorage.setItem("plsFsGateDone", "1"); } catch (e0) {}
-    }
-
-    function viewportCssSize() {
-        var w = window.innerWidth || 0;
-        var h = window.innerHeight || 0;
-        var x = 0;
-        var y = 0;
-        try {
-            var vv = window.visualViewport;
-            if (vv && vv.width > 1 && vv.height > 1) {
-                w = vv.width;
-                h = vv.height;
-                x = vv.offsetLeft || 0;
-                y = vv.offsetTop || 0;
-            }
-        } catch (e0) {}
-        return {
-            w: Math.max(1, w),
-            h: Math.max(1, h),
-            x: x,
-            y: y
-        };
-    }
-
-    function fillGameCanvas() {
-        if (typeof document === "undefined" || canvasFillApplying) return;
-        var canvas = document.getElementById("canvas");
-        if (!canvas) return;
-        var vp = viewportCssSize();
-        var cssW = Math.max(1, Math.round(vp.w));
-        var cssH = Math.max(1, Math.round(vp.h));
-        var key = cssW + "x" + cssH + "@" + Math.round(vp.x) + "," + Math.round(vp.y) + ":" + canvas.width + "x" + canvas.height;
-        try {
-            window.startingWidth = cssW;
-            window.startingHeight = cssH;
-            window.startingAspect = cssW / cssH;
-        } catch (e0) {}
-        if (canvasFillLast === key) return;
-        canvasFillApplying = 1;
-        try {
-            canvasFillLast = key;
-            try { canvas.classList.remove("animatedSizeTransitions"); } catch (e1) {}
-            canvas.style.width = cssW + "px";
-            canvas.style.height = cssH + "px";
-            canvas.style.margin = "0px";
-            canvas.style.padding = "0px";
-            canvas.style.maxWidth = "none";
-            canvas.style.maxHeight = "none";
-            canvas.style.position = "fixed";
-            canvas.style.left = Math.round(vp.x) + "px";
-            canvas.style.top = Math.round(vp.y) + "px";
-            canvas.style.right = "auto";
-            canvas.style.bottom = "auto";
-            var loading = (canvas.width === 300 && canvas.height === 150);
-            if (!loading && (Math.abs(canvas.width - cssW) > 2 || Math.abs(canvas.height - cssH) > 2)) {
-                canvas.width = cssW;
-                canvas.height = cssH;
-            }
-        } catch (e2) {
-        } finally {
-            canvasFillApplying = 0;
-        }
-    }
-
-    function scheduleFill() {
-        if (canvasFillRaf) return;
-        try {
-            canvasFillRaf = requestAnimationFrame(function () {
-                canvasFillRaf = 0;
-                fillGameCanvas();
-            });
-        } catch (e0) {
-            canvasFillRaf = 0;
-            fillGameCanvas();
-        }
-    }
-
-    function installCanvasFill() {
-        if (global.__plsCanvasFillReady || canvasFillReady || typeof document === "undefined") {
-            fillGameCanvas();
-            return;
-        }
-        canvasFillReady = 1;
-        global.__plsCanvasFillReady = 1;
-        window.ensureAspectRatio = function () {
-            fillGameCanvas();
-        };
-        fillGameCanvas();
-        setTimeout(fillGameCanvas, 120);
-        setTimeout(fillGameCanvas, 400);
-    }
-
-    function relayoutGame() {
-        fillGameCanvas();
-    }
-
-    function lockLandscape() {
-        try {
-            var ori = screen.orientation || screen.mozOrientation;
-            if (ori && typeof ori.lock === "function") ori.lock("landscape").catch(function () {});
-        } catch (e0) {}
-        try { if (screen.lockOrientation) screen.lockOrientation("landscape"); } catch (e1) {}
-        try { if (screen.mozLockOrientation) screen.mozLockOrientation("landscape"); } catch (e2) {}
-    }
-
-    function requestPageFullscreen() {
-        var el = document.documentElement;
-        var fn = el.requestFullscreen || el.webkitRequestFullscreen || el.webkitRequestFullScreen || el.msRequestFullscreen;
-        if (!fn) return Promise.resolve(false);
-        try {
-            var ret = fn.call(el, { navigationUI: "hide" });
-            if (ret && typeof ret.then === "function") {
-                return ret.then(function () { return true; }).catch(function () { return false; });
-            }
-            return Promise.resolve(true);
-        } catch (e0) {
-            return Promise.resolve(false);
-        }
-    }
-
-    function hideFsOverlays() {
-        var gate = document.getElementById("pls-gx-fs-gate");
-        if (gate) gate.style.display = "none";
-        var chip = document.getElementById("pls-gx-fs-chip");
-        if (chip) chip.style.display = "none";
-    }
-
-    function dismissFsGate() {
-        var gate = document.getElementById("pls-gx-fs-gate");
-        if (gate && gate.parentNode) gate.parentNode.removeChild(gate);
-        relayoutGame();
-        setTimeout(relayoutGame, 120);
-        setTimeout(relayoutGame, 400);
-        syncFsChrome();
-    }
-
-    function enterFullscreenPlay() {
-        markFsWanted();
-        markFsGateDone();
-        requestPageFullscreen().then(function () {
-            lockLandscape();
-            dismissFsGate();
-        });
-    }
-
-    function reenterFullscreenSoon() {
-        if (!fsWanted || fsPicking || dropLayerOpen) {
-            syncFsChrome();
-            return;
-        }
-        requestPageFullscreen().then(function (ok) {
-            if (ok) lockLandscape();
-            relayoutGame();
-            syncFsChrome();
-        });
-        setTimeout(function () {
-            if (fsWanted && !isPageFullscreen()) syncFsChrome();
-        }, 350);
-    }
-
-    function syncRotateHint() {
-        if (typeof document === "undefined") return;
-        var hint = document.getElementById("pls-gx-rotate-hint");
-        if (!isPortraitView() || document.getElementById("pls-gx-fs-gate") || dropLayerOpen) {
-            if (hint) hint.style.display = "none";
-            return;
-        }
-        if (!hint) {
-            hint = document.createElement("div");
-            hint.id = "pls-gx-rotate-hint";
-            hint.lang = "en-US";
-            hint.textContent = "Rotate to landscape";
-            hint.style.cssText = "position:fixed;left:0;right:0;top:0;z-index:2147483643;background:#bdff00;color:#111;text-align:center;padding:10px 12px;font:600 15px/1.3 arial,sans-serif;";
-            (document.body || document.documentElement).appendChild(hint);
-        }
-        hint.style.display = "block";
-    }
-
-    function ensureFsStyle() {
-        if (document.getElementById("pls-gx-fs-style")) return;
-        var st = document.createElement("style");
-        st.id = "pls-gx-fs-style";
-        st.textContent = "html,body{margin:0;background:#060612;overflow:hidden;height:100%;height:100dvh;width:100%;min-width:0;min-height:0}#canvas,canvas.emscripten{padding:0!important;margin:0!important;max-width:none!important;max-height:none!important;transition:none!important}#pls-gx-fs-gate{position:fixed;inset:0;z-index:2147483646;background:#060612;color:#eee;display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:arial,sans-serif;text-align:center;padding:24px;-webkit-tap-highlight-color:transparent}#pls-gx-fs-gate p{opacity:.85;margin:0 0 22px;line-height:1.55;font-size:1.02rem}#pls-gx-fs-gate b{display:inline-block;background:#bdff00;color:#111;border-radius:12px;padding:14px 28px;font-size:1.05rem}#pls-gx-fs-chip{position:fixed;right:12px;bottom:12px;z-index:2147483644;background:#bdff00;color:#111;border:0;border-radius:10px;padding:10px 14px;font:700 14px arial,sans-serif;cursor:pointer;-webkit-tap-highlight-color:transparent}";
-        (document.head || document.documentElement).appendChild(st);
-    }
-
-    function showFullGate() {
-        ensureFsStyle();
-        var gate = document.getElementById("pls-gx-fs-gate");
-        if (!gate) {
-            gate = document.createElement("div");
-            gate.id = "pls-gx-fs-gate";
-            gate.lang = "en-US";
-            gate.innerHTML = "<p>Rotate to landscape.<br>Tap fullscreen before playing.</p><b>Fullscreen</b>";
-            gate.addEventListener("click", function (ev) {
-                ev.preventDefault();
-                enterFullscreenPlay();
-            }, true);
-            (document.body || document.documentElement).appendChild(gate);
-        }
-        gate.style.display = "flex";
-        var chip = document.getElementById("pls-gx-fs-chip");
-        if (chip) chip.style.display = "none";
-    }
-
-    function showCompactFs() {
-        ensureFsStyle();
-        var gate = document.getElementById("pls-gx-fs-gate");
-        if (gate) gate.style.display = "none";
-        var chip = document.getElementById("pls-gx-fs-chip");
-        if (!chip) {
-            chip = document.createElement("button");
-            chip.type = "button";
-            chip.id = "pls-gx-fs-chip";
-            chip.lang = "en-US";
-            chip.textContent = "Fullscreen";
-            chip.addEventListener("click", function (ev) {
-                ev.preventDefault();
-                enterFullscreenPlay();
-            });
-            (document.body || document.documentElement).appendChild(chip);
-        }
-        chip.style.display = "block";
-    }
-
-    function syncFsChrome() {
-        if (typeof document === "undefined") return;
-        if (dropLayerOpen || fsPicking) {
-            hideFsOverlays();
-            syncRotateHint();
-            return;
-        }
-        if (isPageFullscreen()) {
-            hideFsOverlays();
-            syncRotateHint();
-            return;
-        }
-        if (!shouldOfferFullscreen()) {
-            hideFsOverlays();
-            syncRotateHint();
-            return;
-        }
-        if (!fsGateDone && wantsBlockingGate()) showFullGate();
-        else showCompactFs();
-        syncRotateHint();
-    }
-
-    function bindFsListeners() {
-        if (fsUiReady || global.__plsFsListeners) return;
-        fsUiReady = 1;
-        global.__plsFsListeners = 1;
-        document.addEventListener("fullscreenchange", function () {
-            scheduleFill();
-            syncFsChrome();
-        });
-        document.addEventListener("webkitfullscreenchange", function () {
-            scheduleFill();
-            syncFsChrome();
-        });
-        window.addEventListener("orientationchange", function () {
-            setTimeout(function () { scheduleFill(); syncFsChrome(); }, 200);
-        });
-        window.addEventListener("resize", function () {
-            scheduleFill();
-            syncFsChrome();
-        });
-        window.addEventListener("focus", function () { if (fsWanted) reenterFullscreenSoon(); });
-        document.addEventListener("visibilitychange", function () {
-            if (document.visibilityState === "visible" && fsWanted) reenterFullscreenSoon();
-        });
-        try {
-            if (window.visualViewport) {
-                visualViewport.addEventListener("resize", function () {
-                    scheduleFill();
-                    syncFsChrome();
-                });
-            }
-        } catch (e0) {}
-    }
-
-    function installFsUi() {
-        if (typeof document === "undefined") return;
-        loadFsFlags();
-        ensureFsStyle();
-        bindFsListeners();
-        installCanvasFill();
-        if (!document.body) {
-            document.addEventListener("DOMContentLoaded", syncFsChrome);
-            return;
-        }
-        syncFsChrome();
-    }
-
-    function uninstallStaleCaches() {
-        if (global.__plsSwUnreg) return;
-        global.__plsSwUnreg = 1;
-        try {
-            if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) {
-                navigator.serviceWorker.getRegistrations().then(function (rs) {
-                    var i;
-                    for (i = 0; i < (rs || []).length; i++) rs[i].unregister();
-                });
-            }
-        } catch (e0) {}
-        try {
-            if (window.caches && caches.keys) {
-                caches.keys().then(function (keys) {
-                    var i;
-                    for (i = 0; i < (keys || []).length; i++) caches.delete(keys[i]);
-                });
-            }
-        } catch (e1) {}
-    }
-
-    function scheduleUiBoot() {
-        if (global.__plsUiBootScheduled) return;
-        global.__plsUiBootScheduled = 1;
-        var n = 0;
-        function go() {
-            if (global.__plsUiBooted) return;
-            global.__plsUiBooted = 1;
-            try { uninstallStaleCaches(); } catch (e0) {}
-            try { installFsUi(); } catch (e1) {}
-        }
-        function wait() {
-            n++;
-            try {
-                var c = document.getElementById("canvas");
-                if (c && c.classList && c.classList.contains("active")) {
-                    go();
-                    return;
-                }
-            } catch (e2) {}
-            if (n >= 40) {
-                go();
-                return;
-            }
-            setTimeout(wait, 50);
-        }
-        setTimeout(wait, 0);
-    }
-
     function boot() {
         if (typeof document === "undefined") return 0;
-        try {
-            exportDropApi();
-            if (booted) return 1;
-            booted = 1;
-            hideOverlayFileInput();
-            dropLayer();
-            patchPause();
-            reexportVideo();
-            reexportShader();
-            interceptDownloadTabs();
-            listenImportChannel();
-            window.addEventListener("focus", onReturnFromDialog);
-            window.addEventListener("pageshow", onReturnFromDialog);
-            document.addEventListener("visibilitychange", function () {
-                if (document.visibilityState === "visible") onReturnFromDialog();
-            }, true);
-            scheduleUiBoot();
-        } catch (eBoot) {}
+        hideOverlayFileInput();
+        dropLayer();
+        patchPause();
+        exportDropApi();
+        reexportVideo();
+        reexportShader();
+        if (booted) return 1;
+        booted = 1;
+        if (!global.PhiGX && !document.getElementById("pls-gx-shell-script")) {
+            var shell = document.createElement("script");
+            shell.id = "pls-gx-shell-script";
+            shell.src = new URL("gx_shell.js", document.baseURI).href;
+            (document.head || document.documentElement).appendChild(shell);
+        }
+        window.addEventListener("focus", onReturnFromDialog);
+        window.addEventListener("pageshow", onReturnFromDialog);
+        document.addEventListener("visibilitychange", function () {
+            if (document.visibilityState === "visible") onReturnFromDialog();
+        }, true);
+        interceptDownloadTabs();
+        listenImportChannel();
         return 1;
     }
 
@@ -1609,6 +1247,65 @@
         }
     }
 
+    function ensureMsgOverlay() {
+        var id = "pls-gx-msgbox-root";
+        var el = document.getElementById(id);
+        if (el) return el;
+        el = document.createElement("div");
+        el.id = id;
+        el.style.cssText = "position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,0.55);z-index:2147483646;font-family:sans-serif;";
+        (document.body || document.documentElement).appendChild(el);
+        return el;
+    }
+
+    function showGxDialog(title, message, kind, done) {
+        if (typeof document === "undefined") {
+            if (done) done(1);
+            return;
+        }
+        var root = ensureMsgOverlay();
+        root.innerHTML = "";
+        var box = document.createElement("div");
+        box.style.cssText = "min-width:280px;max-width:480px;background:#1c2230;color:#fff;border:1px solid #6a7388;border-radius:8px;padding:18px 20px;";
+        var h = document.createElement("div");
+        h.textContent = title || "Message";
+        h.style.cssText = "font-size:18px;margin-bottom:10px;color:" + (kind === 3 ? "#ff6b6b" : kind === 2 ? "#ffd166" : "#9ad1ff") + ";";
+        var p = document.createElement("div");
+        p.textContent = message || "";
+        p.style.cssText = "font-size:14px;line-height:1.4;white-space:pre-wrap;margin-bottom:16px;";
+        var row = document.createElement("div");
+        row.style.cssText = "display:flex;gap:8px;" + (msgAlign === 2 ? "justify-content:center;" : msgAlign === 3 ? "justify-content:flex-end;" : "justify-content:flex-start;");
+        var labels = [];
+        for (var i = 0; i < 4; i++) if (msgButtons[i]) labels.push({ index: i + 1, text: msgButtons[i] });
+        if (!labels.length) labels.push({ index: 1, text: "OK" });
+        labels.forEach(function (btn) {
+            var b = document.createElement("button");
+            b.textContent = btn.text;
+            b.style.cssText = "background:#3b82f6;color:#fff;border:0;border-radius:4px;padding:8px 14px;cursor:pointer;";
+            b.onclick = function () {
+                root.style.display = "none";
+                if (done) done(btn.index);
+            };
+            row.appendChild(b);
+        });
+        box.appendChild(h);
+        box.appendChild(p);
+        box.appendChild(row);
+        root.appendChild(box);
+        root.style.display = "flex";
+    }
+
+    function showGxMsgAsync(message, title, kind) {
+        var id = nextMsg++;
+        msgTasks[id] = { status: MSG_RUNNING, result: 0 };
+        showGxDialog(toStr(title), toStr(message), toNum(kind) | 0, function (result) {
+            if (!msgTasks[id]) return;
+            msgTasks[id].status = MSG_DONE;
+            msgTasks[id].result = result;
+        });
+        return id;
+    }
+
     function fileUiRpcNum(raw) {
         var s = toStr(raw);
         if (s.indexOf("pls-f:") !== 0) return null;
@@ -1627,7 +1324,40 @@
                 case "fopen": return openReadPath(parts[1] || "");
                 case "fread": return makeReadChunk(num(1), num(2));
                 case "head": return makeHeadText(parts[1] || "");
+                case "sync": persistFs(); return 1;
+                case "locale": if (global.PhiGX) global.PhiGX.setLocale(parts[1]); return 1;
+                case "skinstat": return state.kind === "skin" ? state.status : 0;
+                case "skinrect": return setSkinPickRect(num(1), num(2), num(3), num(4), num(5), num(6));
                 case "mode": return isRemoteMode() ? 1 : 0;
+                case "msgping": return 1;
+                case "msgclear":
+                    msgButtons = ["", "", "", ""];
+                    return 1;
+                case "msgbtn": {
+                    var bi = (num(1) | 0) - 1;
+                    if (bi < 0 || bi > 3) return 0;
+                    msgButtons[bi] = rpcUnescape(parts[2] || "");
+                    return 1;
+                }
+                case "msgalign":
+                    msgAlign = num(1) | 0;
+                    return 1;
+                case "alert":
+                    return showGxMsgAsync(rpcUnescape(parts[1] || ""), rpcUnescape(parts[2] || ""), num(3));
+                case "msgstatus": {
+                    var st = msgTasks[num(1) | 0];
+                    return st ? st.status : MSG_UNKNOWN;
+                }
+                case "msgresult": {
+                    var rs = msgTasks[num(1) | 0];
+                    return rs ? rs.result : 0;
+                }
+                case "msgrelease": {
+                    var rid = num(1) | 0;
+                    if (!msgTasks[rid]) return 0;
+                    delete msgTasks[rid];
+                    return 1;
+                }
                 default: return 0;
             }
         } catch (e) {
@@ -1884,28 +1614,23 @@
         return null;
     }
 
-    function blobUrlFromBytes(bytes, mime, key) {
-        if (key && mediaUrlCache[key]) return mediaUrlCache[key];
+    function blobUrlFromBytes(bytes, mime) {
         var blob = new Blob([bytes], { type: mime || "application/octet-stream" });
-        var url = URL.createObjectURL(blob);
-        if (key) mediaUrlCache[key] = url;
-        return url;
+        return URL.createObjectURL(blob);
     }
 
     function mediaSrc(path) {
         var p = toStr(path).replace(/\\/g, "/");
         if (!p) return "";
         if (p.indexOf("blob:") === 0 || p.indexOf("http://") === 0 || p.indexOf("https://") === 0 || p.indexOf("data:") === 0) return p;
-        if (mediaUrlCache[p]) return mediaUrlCache[p];
         var mem = lookupExtracted(p);
-        if (mem && mem.length) return blobUrlFromBytes(mem, mediaMime(p), p);
+        if (mem && mem.length) return blobUrlFromBytes(mem, mediaMime(p));
         var fs = getFS();
         if (fs && typeof fs.readFile === "function") {
             var tries = candidatePaths(p);
             for (var i = 0; i < tries.length; i++) {
-                if (mediaUrlCache[tries[i]]) return mediaUrlCache[tries[i]];
                 var bytes = lookupExtracted(tries[i]) || readFsBytes(fs, tries[i]);
-                if (bytes && bytes.length) return blobUrlFromBytes(bytes, mediaMime(tries[i]), tries[i]);
+                if (bytes && bytes.length) return blobUrlFromBytes(bytes, mediaMime(tries[i]));
             }
             lastAudioError = "fs read failed tries=" + tries.length;
         } else {
@@ -1926,7 +1651,6 @@
     function makeAudioEl(src, objectUrl) {
         var el = new Audio();
         el.preload = "auto";
-        try { el.playbackRate = 1; el.defaultPlaybackRate = 1; } catch (eRate) {}
         try { el.crossOrigin = "anonymous"; } catch (e0) {}
         el.src = src;
         if (objectUrl) el.__plsObjectUrl = objectUrl;
@@ -1945,7 +1669,13 @@
             "i_gx_drop_poll_import", "i_gx_drop_unpause", "i_gx_drop_status",
             "i_gx_drop_hover", "i_gx_drop_filename", "i_gx_drop_error",
             "i_gx_drop_size", "i_gx_drop_chunk", "i_gx_drop_import", "i_gx_drop_reset",
-            "i_gx_import_url", "i_gx_query_get"
+            "i_gx_import_url", "i_gx_query_get",
+            "i_gx_msgbox_clear_buttons", "i_gx_msgbox_set_button", "i_gx_msgbox_set_button_alignment",
+            "i_gx_msgbox_show_async", "i_gx_msgbox_task_status", "i_gx_msgbox_task_result",
+            "i_gx_msgbox_task_release",
+            "i_html5_msgbox_clear_buttons", "i_html5_msgbox_set_button", "i_html5_msgbox_set_button_alignment",
+            "i_html5_msgbox_show_async", "i_html5_msgbox_task_status", "i_html5_msgbox_task_result",
+            "i_html5_msgbox_task_release"
         ];
         for (var i = 0; i < names.length; i++) {
             if (typeof global[names[i]] === "function") exportGx(names[i], global[names[i]]);
@@ -1976,6 +1706,7 @@
         exportGx("i_gx_audio_append", global.i_gx_audio_append);
         exportGx("i_gx_audio_end", global.i_gx_audio_end);
         exportGx("i_gx_audio_play", global.i_gx_audio_play);
+        exportGx("i_gx_audio_set_volume", global.i_gx_audio_set_volume);
         exportGx("i_gx_audio_pause", global.i_gx_audio_pause);
         exportGx("i_gx_audio_resume", global.i_gx_audio_resume);
         exportGx("i_gx_audio_stop", global.i_gx_audio_stop);
@@ -2042,6 +1773,12 @@
         }
         var src = blobUrlFromBytes(out, rec.mime);
         audios[id] = makeAudioEl(src, src);
+        return 1;
+    });
+    exportGx("i_gx_audio_set_volume", function (handle, volume) {
+        var el = audios[toNum(handle) | 0];
+        if (!el) return 0;
+        el.volume = Math.max(0, Math.min(1, toNum(volume)));
         return 1;
     });
     exportGx("i_gx_audio_play", function (handle) {
@@ -2111,12 +1848,7 @@
         var k = toStr(key);
         if (k === "pls-r:mode" || k === "pls-f:mode") return isRemoteMode() ? "1" : "0";
         if (k === "pls-f:drop") return dropLayerOpen ? "1" : "0";
-        if (k === "pls-f:vw" || k === "pls-f:vh") {
-            var vp = viewportCssSize();
-            return String(Math.max(1, Math.round(k === "pls-f:vw" ? vp.w : vp.h)));
-        }
         if (k === "pls-f:path") return state.importedPath || "";
-        if (k === "pls-f:zipn") return String((importedZipBytes && importedZipBytes.length) || (state.bytes && state.bytes.length) || 0);
         if (k === "pls-f:unziperr") return lastUnzipError || "";
         if (k === "pls-f:unzipn") return String(lastUnzipCount || 0);
         if (k === "pls-f:list") return lastListText || "";
@@ -2166,6 +1898,7 @@
     };
     global.i_gx_drop_poll_import = function () { pollIndexedDb(); return state.status; };
     global.i_gx_drop_unpause = function () {
+        if (global.PhiGX && global.PhiGX.suspended()) return 0;
         hidePauseUi();
         try {
             var gmUnpause = lookupFn("GM_unpause");
@@ -2177,18 +1910,13 @@
     global.i_gx_drop_hover = function () { return state.hover ? 1 : 0; };
     global.i_gx_drop_filename = function () { return state.name || ""; };
     global.i_gx_drop_error = function () { return state.error || ""; };
-    global.i_gx_drop_size = function () {
-        if (state.bytes && state.bytes.length) return state.bytes.length;
-        return (importedZipBytes && importedZipBytes.length) || 0;
-    };
+    global.i_gx_drop_size = function () { return state.bytes ? state.bytes.length : 0; };
     global.i_gx_drop_chunk = function (offset, length) {
-        var src = (readFileBytes && readFileBytes.length) ? readFileBytes
-            : ((state.bytes && state.bytes.length) ? state.bytes : importedZipBytes);
-        if (!src) return "";
+        if (!state.bytes) return "";
         var start = Math.max(0, toNum(offset) | 0);
         var count = Math.max(0, toNum(length) | 0);
-        if (count <= 0 || start >= src.length) return "";
-        return bytesToBase64(src.subarray(start, Math.min(src.length, start + count)));
+        if (count <= 0 || start >= state.bytes.length) return "";
+        return bytesToBase64(state.bytes.subarray(start, Math.min(state.bytes.length, start + count)));
     };
     global.i_gx_drop_import = function (path) {
         var fileUi = fileUiRpcNum(path);
@@ -2199,15 +1927,8 @@
         if (shader !== null) return shader;
         var rpc = videoRpcNum(path);
         if (rpc !== null) return rpc;
-        var zip = (state.bytes && state.bytes.length) ? state.bytes : importedZipBytes;
-        if (!zip || !zip.length) return 0;
+        if (!state.bytes) return 0;
         var dest = toStr(path).replace(/\\/g, "/");
-        var destLower = dest.toLowerCase();
-        if (!dest || destLower.indexOf("/_savedata") === 0 || destLower.indexOf("/savedata") === 0) {
-            dest = "/tmp/pls/charts/" + (dest.split("/").pop() || state.name || "chart.zip");
-        }
-        state.importedPath = dest.charAt(0) === "/" ? dest : "/" + dest;
-        rememberImportedZip(zip);
         var fs = getFS();
         try {
             if (fs && typeof fs.writeFile === "function") {
@@ -2216,42 +1937,59 @@
                 if (folder && typeof fs.mkdirTree === "function") {
                     try { fs.mkdirTree(folder); } catch (e1) {}
                 }
-                fs.writeFile(dest, zip);
+                fs.writeFile(dest, state.bytes);
+                return 1;
             }
         } catch (err) {}
+        return 0;
+    };
+    global.i_gx_msgbox_clear_buttons = function () {
+        msgButtons = ["", "", "", ""];
         return 1;
     };
+    global.i_gx_msgbox_set_button = function (index, text) {
+        var i = (toNum(index) | 0) - 1;
+        if (i < 0 || i > 3) return 0;
+        msgButtons[i] = toStr(text);
+        return 1;
+    };
+    global.i_gx_msgbox_set_button_alignment = function (alignment) {
+        msgAlign = toNum(alignment) | 0;
+        return 1;
+    };
+    global.i_gx_msgbox_show_async = function (message, title, kind) {
+        return showGxMsgAsync(message, title, kind);
+    };
+    global.i_gx_msgbox_task_status = function (taskId) {
+        var task = msgTasks[toNum(taskId) | 0];
+        return task ? task.status : MSG_UNKNOWN;
+    };
+    global.i_gx_msgbox_task_result = function (taskId) {
+        var task = msgTasks[toNum(taskId) | 0];
+        return task ? task.result : 0;
+    };
+    global.i_gx_msgbox_task_release = function (taskId) {
+        var id = toNum(taskId) | 0;
+        if (!msgTasks[id]) return 0;
+        delete msgTasks[id];
+        return 1;
+    };
+    global.i_html5_msgbox_clear_buttons = global.i_gx_msgbox_clear_buttons;
+    global.i_html5_msgbox_set_button = global.i_gx_msgbox_set_button;
+    global.i_html5_msgbox_set_button_alignment = global.i_gx_msgbox_set_button_alignment;
+    global.i_html5_msgbox_show_async = global.i_gx_msgbox_show_async;
+    global.i_html5_msgbox_task_status = global.i_gx_msgbox_task_status;
+    global.i_html5_msgbox_task_result = global.i_gx_msgbox_task_result;
+    global.i_html5_msgbox_task_release = global.i_gx_msgbox_task_release;
     global.i_gx_drop_reset = function () {
         state.status = STATUS_IDLE;
         state.hover = 0;
+        state.name = "";
         state.error = "";
         state.bytes = null;
-        state.importedPath = state.importedPath || "";
+        state.importedPath = "";
         return 1;
     };
-    var liveQueryGet = global.i_gx_query_get;
-    var liveDropImport = global.i_gx_drop_import;
-    var liveDropReset = global.i_gx_drop_reset;
-    var liveDropSize = global.i_gx_drop_size;
-    var liveDropChunk = global.i_gx_drop_chunk;
-    var liveDropStatus = global.i_gx_drop_status;
-    var liveDropFilename = global.i_gx_drop_filename;
-    global.__plsGxDropReexport = function () {
-        global.i_gx_query_get = liveQueryGet;
-        global.i_gx_drop_import = liveDropImport;
-        global.i_gx_drop_reset = liveDropReset;
-        global.i_gx_drop_size = liveDropSize;
-        global.i_gx_drop_chunk = liveDropChunk;
-        global.i_gx_drop_status = liveDropStatus;
-        global.i_gx_drop_filename = liveDropFilename;
-        exportDropApi();
-    };
-    global.__plsGxDropLoaded34 = 1;
-    global.__plsGxDropLoaded33 = 1;
-    global.__plsGxDropLoaded32 = 1;
-    global.__plsGxDropLoaded31 = 1;
-    global.__plsGxDropLoaded30 = 1;
-    global.__plsGxDropLoaded29 = 1;
     exportDropApi();
 
     (function installGxVideo(g) {
@@ -2384,6 +2122,7 @@
             document.addEventListener("pageshow", function () { onPageHidden(false); }, true);
         }
         function getGL() {
+            try { if (g.Module && typeof g.Module.phiGLContext === "function") return g.Module.phiGLContext(); } catch (eExport) {}
             try { if (typeof GLctx !== "undefined" && GLctx && GLctx.drawArrays) return GLctx; } catch (e0) {}
             try {
                 if (typeof GL !== "undefined" && GL && GL.currentContext) return GL.currentContext.GLctx || GL.currentContext;
@@ -2806,6 +2545,7 @@
             return 0;
         }
         function getGL() {
+            try { if (g.Module && typeof g.Module.phiGLContext === "function") return g.Module.phiGLContext(); } catch (eExport) {}
             try { if (typeof GLctx !== "undefined" && GLctx && GLctx.drawArrays) return GLctx; } catch (e0) {}
             try {
                 if (typeof GL !== "undefined" && GL && GL.currentContext) return GL.currentContext.GLctx || GL.currentContext;
@@ -2950,7 +2690,7 @@
             return source;
         }
         function hasVaryingUv(source) {
-            return /varying\s+(?:(?:lowp|mediump|highp)\s+)?vec2\s+uv\b/.test(source);
+            return /(?:varying|in)\s+(?:(?:lowp|mediump|highp)\s+)?vec2\s+uv\b/.test(source);
         }
         function hasLocalUv(source) {
             return /\bvec2\s+uv\s*=/.test(source);
@@ -3050,8 +2790,7 @@
         function prepareGlslEs(fragment, sourceName, es300) {
             fragment = replaceAll(fragment, "\r\n", "\n");
             fragment = stripShaderComments(fragment);
-            fragment = replaceAll(fragment, "#version 300 es", "");
-            fragment = replaceAll(fragment, "#version 100", "");
+            fragment = fragment.replace(/^\s*#\s*version[^\n]*/gm, "");
             fragment = fragment.replace(/precision\s+(?:lowp|mediump|highp)\s+float\s*;/g, "");
             fragment = fragment.replace(/\blayout\s*\([^)]*\)\s*/g, "");
             fragment = replaceAll(fragment, "texture2D(", "__RPE_TEX2D__(");
@@ -3067,12 +2806,19 @@
             } else if (fragment.indexOf("iResolution") >= 0) {
                 fragment = "#define iResolution screenSize\n" + fragment;
             }
-            fragment = rewriteDynamicForLoops(fragment, !es300);
+            // WebGL 2 supports dynamic loops. On WebGL 1 preserve the index
+            // type: converting float counters to int breaks valid shader math.
+            if (!es300) {
+                fragment = fragment.replace(/for\s*\(\s*float\s+(\w+)\s*=\s*-\s*([A-Za-z_]\w*)\s*;\s*\1\s*(<=?)\s*\2\s*;\s*(?:\+\+\1|\1\+\+|\1\s*\+=\s*1(?:\.0)?)\s*\)/g,
+                    "for (float $1 = -32.0; $1 <= 32.0; $1 += 1.0) if ($1 >= -float($2) && $1 $3 float($2))");
+                fragment = fragment.replace(/for\s*\(\s*float\s+(\w+)\s*=\s*0(?:\.0)?\s*;\s*\1\s*(<=?)\s*([A-Za-z_]\w*)\s*;\s*(?:\+\+\1|\1\+\+|\1\s*\+=\s*1(?:\.0)?)\s*\)/g,
+                    "for (float $1 = 0.0; $1 < 512.0; $1 += 1.0) if ($1 $2 float($3))");
+            }
             fragment = rewriteParticleHelpers(fragment);
             fragment = replaceAll(fragment, "return color / total;",
                 "return (total > 0.0001) ? (color / total) : texture2D(screenTexture, uv);");
             fragment = replaceAll(fragment, "uniform sampler2D screenTexture;",
-                "uniform sampler2D gm_BaseTexture;\n#define screenTexture gm_BaseTexture");
+                "uniform sampler2D gm_BaseTexture;\n#define screenTexture gm_BaseTexture\n");
             fragment = replaceAll(fragment, "mat3(1.0)",
                 "mat3(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)");
             fragment = replaceAll(fragment, "uv != clamp(uv, vec2(0.0), vec2(1.0))",
@@ -3124,13 +2870,13 @@
         }
         function parseUniforms(src, record) {
             record.uniforms = {};
-            var re = /uniform\s+(?:(?:lowp|mediump|highp)\s+)?(float|vec2|vec3|vec4)\s+(\w+)\s*;/g;
+            var re = /uniform\s+(?:(?:lowp|mediump|highp)\s+)?(float|vec2|vec3|vec4|int|bool|ivec2|ivec3|ivec4)\s+(\w+)\s*;/g;
             var m;
             while ((m = re.exec(src))) {
                 var type = m[1], name = m[2];
                 if (name === "u_uvRect" || name === "u_yFlip" || name === "u_texScale") continue;
-                var comp = type === "float" ? 1 : type === "vec2" ? 2 : type === "vec3" ? 3 : 4;
-                var rec = { components: comp, values: [0, 0, 0, 0], location: -1 };
+                var comp = /[234]$/.test(type) ? Number(type.slice(-1)) : 1;
+                var rec = { components: comp, integer: /^(int|bool|ivec)/.test(type), values: [0, 0, 0, 0], location: -1 };
                 record.uniforms[name] = rec;
                 record.uniforms["_" + name] = rec;
             }
@@ -3182,6 +2928,7 @@
             }
             quadGl = gl;
             if (!quadBuf) {
+                var previousBuffer = gl.getParameter(gl.ARRAY_BUFFER_BINDING);
                 quadBuf = gl.createBuffer();
                 gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
                 gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
@@ -3190,6 +2937,7 @@
                     -1, -1, 0, 1,
                     1, -1, 1, 1
                 ]), gl.STATIC_DRAW);
+                gl.bindBuffer(gl.ARRAY_BUFFER, previousBuffer);
             }
             if (!quadVao && typeof gl.createVertexArray === "function") {
                 try { quadVao = gl.createVertexArray(); } catch (e0) { quadVao = null; }
@@ -3223,35 +2971,63 @@
             var vp = gl.getParameter(gl.VIEWPORT);
             var x = vp[0] | 0, y = vp[1] | 0, w = Math.max(vp[2] | 0, 1), h = Math.max(vp[3] | 0, 1);
             var prevScissor = gl.isEnabled(gl.SCISSOR_TEST);
-            gl.disable(gl.SCISSOR_TEST);
-            try { if (gl.PIXEL_UNPACK_BUFFER) gl.bindBuffer(gl.PIXEL_UNPACK_BUFFER, null); } catch (e0) {}
-            try { if (gl.PIXEL_PACK_BUFFER) gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null); } catch (e1) {}
+            var prevActive = gl.getParameter(gl.ACTIVE_TEXTURE);
             gl.activeTexture(gl.TEXTURE0);
-            if (!inputTex) inputTex = gl.createTexture();
-            gl.bindTexture(gl.TEXTURE_2D, inputTex);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-            drainGL(gl);
-            if (texW !== w || texH !== h) {
-                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-                var allocErr = gl.getError();
-                if (allocErr) {
-                    if (prevScissor) gl.enable(gl.SCISSOR_TEST);
-                    return setErr("shader capture texImage2D " + allocErr);
+            var prevTexture0 = gl.getParameter(gl.TEXTURE_BINDING_2D);
+            var webgl2 = isWebGL2(gl);
+            var prevUnpack = webgl2 ? gl.getParameter(gl.PIXEL_UNPACK_BUFFER_BINDING) : null;
+            var prevDraw = webgl2 ? gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING) : gl.getParameter(gl.FRAMEBUFFER_BINDING);
+            var prevRead = webgl2 ? gl.getParameter(gl.READ_FRAMEBUFFER_BINDING) : prevDraw;
+            var resolve = null;
+            try {
+                gl.disable(gl.SCISSOR_TEST);
+                if (webgl2) gl.bindBuffer(gl.PIXEL_UNPACK_BUFFER, null);
+                if (!inputTex) inputTex = gl.createTexture();
+                gl.bindTexture(gl.TEXTURE_2D, inputTex);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+                drainGL(gl);
+                if (texW !== w || texH !== h) {
+                    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+                    var allocErr = gl.getError();
+                    if (allocErr) return setErr("shader capture texImage2D " + allocErr);
+                    texW = w;
+                    texH = h;
                 }
-                texW = w;
-                texH = h;
+                if (webgl2 && gl.getParameter(gl.SAMPLES) > 0) {
+                    resolve = gl.createFramebuffer();
+                    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, prevDraw);
+                    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, resolve);
+                    gl.framebufferTexture2D(gl.DRAW_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, inputTex, 0);
+                    if (gl.checkFramebufferStatus(gl.DRAW_FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE)
+                        return setErr("shader capture: incomplete resolve framebuffer");
+                    gl.blitFramebuffer(x, y, x + w, y + h, 0, 0, w, h, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+                } else {
+                    if (webgl2) gl.bindFramebuffer(gl.READ_FRAMEBUFFER, prevDraw);
+                    gl.copyTexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, x, y, w, h);
+                }
+                var copyErr = gl.getError();
+                if (copyErr) return setErr("shader capture copy/resolve " + copyErr);
+                lastW = w;
+                lastH = h;
+                captured = 1;
+                lastErr = "";
+                return 1;
+            } catch (err) {
+                return setErr("shader capture failed: " + err.message);
+            } finally {
+                if (webgl2) {
+                    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, prevDraw);
+                    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, prevRead);
+                    gl.bindBuffer(gl.PIXEL_UNPACK_BUFFER, prevUnpack);
+                }
+                if (resolve) gl.deleteFramebuffer(resolve);
+                gl.bindTexture(gl.TEXTURE_2D, prevTexture0);
+                gl.activeTexture(prevActive);
+                if (prevScissor) gl.enable(gl.SCISSOR_TEST); else gl.disable(gl.SCISSOR_TEST);
             }
-            gl.copyTexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, x, y, w, h);
-            var copyErr = gl.getError();
-            if (prevScissor) gl.enable(gl.SCISSOR_TEST);
-            if (copyErr) return setErr("shader capture copyTexSubImage2D " + copyErr);
-            lastW = w;
-            lastH = h;
-            captured = 1;
-            return 1;
         }
 
         bindShader("i_gx_shader_ping", function () { return getGL() ? 1 : 0; });
@@ -3372,10 +3148,26 @@
             var prevBuf = gl.getParameter(gl.ARRAY_BUFFER_BINDING);
             var prevTex = gl.getParameter(gl.TEXTURE_BINDING_2D);
             var prevActive = gl.getParameter(gl.ACTIVE_TEXTURE);
+            gl.activeTexture(gl.TEXTURE0);
+            var prevTexture0 = gl.getParameter(gl.TEXTURE_BINDING_2D);
+            var prevSampler0 = isWebGL2(gl) ? gl.getParameter(gl.SAMPLER_BINDING) : null;
+            gl.activeTexture(prevActive);
             var prevUnpack = null;
             try { if (gl.PIXEL_UNPACK_BUFFER) prevUnpack = gl.getParameter(gl.PIXEL_UNPACK_BUFFER_BINDING); } catch (eU) {}
             var prevVAO = null;
             try { prevVAO = gl.getParameter(gl.VERTEX_ARRAY_BINDING); } catch (e0) {}
+            var prevAttribs = [];
+            if (!quadVao) {
+                for (var ai = 0; ai < 2; ai++) prevAttribs.push({
+                    buffer: gl.getVertexAttrib(ai, gl.VERTEX_ATTRIB_ARRAY_BUFFER_BINDING),
+                    size: gl.getVertexAttrib(ai, gl.VERTEX_ATTRIB_ARRAY_SIZE),
+                    type: gl.getVertexAttrib(ai, gl.VERTEX_ATTRIB_ARRAY_TYPE),
+                    normalized: gl.getVertexAttrib(ai, gl.VERTEX_ATTRIB_ARRAY_NORMALIZED),
+                    stride: gl.getVertexAttrib(ai, gl.VERTEX_ATTRIB_ARRAY_STRIDE),
+                    offset: gl.getVertexAttribOffset(ai, gl.VERTEX_ATTRIB_ARRAY_POINTER),
+                    enabled: gl.getVertexAttrib(ai, gl.VERTEX_ATTRIB_ARRAY_ENABLED)
+                });
+            }
             var prevViewport = gl.getParameter(gl.VIEWPORT);
             var prevScissorBox = gl.getParameter(gl.SCISSOR_BOX);
             var prevBlend = gl.isEnabled(gl.BLEND);
@@ -3392,6 +3184,7 @@
             var prevEqRGB = gl.getParameter(gl.BLEND_EQUATION_RGB);
             var prevEqA = gl.getParameter(gl.BLEND_EQUATION_ALPHA);
             drainGL(gl);
+            lastErr = "";
             try {
                 if (quadVao) gl.bindVertexArray(quadVao);
                 gl.useProgram(s.prog);
@@ -3405,6 +3198,7 @@
                 gl.depthMask(false);
                 gl.colorMask(true, true, true, true);
                 gl.activeTexture(gl.TEXTURE0);
+                if (isWebGL2(gl)) gl.bindSampler(0, null);
                 gl.bindTexture(gl.TEXTURE_2D, inputTex);
                 if (s.uvRectLoc) gl.uniform4f(s.uvRectLoc, left, top, right, bottom);
                 if (s.texScaleLoc) gl.uniform2f(s.texScaleLoc, 1, 1);
@@ -3422,7 +3216,11 @@
                     if (unames[ui].charAt(0) === "_") continue;
                     var rec = s.uniforms[unames[ui]];
                     if (!rec || rec.location == null) continue;
-                    if (rec.components === 1) gl.uniform1f(rec.location, rec.values[0]);
+                    if (rec.integer) {
+                        var iv = rec.values.slice(0, rec.components).map(function (n) { return n | 0; });
+                        gl["uniform" + rec.components + "iv"](rec.location, iv);
+                    }
+                    else if (rec.components === 1) gl.uniform1f(rec.location, rec.values[0]);
                     else if (rec.components === 2) gl.uniform2f(rec.location, rec.values[0], rec.values[1]);
                     else if (rec.components === 3) gl.uniform3f(rec.location, rec.values[0], rec.values[1], rec.values[2]);
                     else gl.uniform4f(rec.location, rec.values[0], rec.values[1], rec.values[2], rec.values[3]);
@@ -3433,6 +3231,8 @@
                 gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 16, 0);
                 gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 16, 8);
                 gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+                var drawError = gl.getError();
+                if (drawError) throw new Error("WebGL error " + drawError);
                 gl.disableVertexAttribArray(0);
                 gl.disableVertexAttribArray(1);
             } catch (eDraw) {
@@ -3441,8 +3241,19 @@
             try { if (gl.PIXEL_UNPACK_BUFFER) gl.bindBuffer(gl.PIXEL_UNPACK_BUFFER, prevUnpack); } catch (e4) {}
             try {
                 if (quadVao) gl.bindVertexArray(prevVAO);
+                else for (var ai = 0; ai < prevAttribs.length; ai++) {
+                    var attr = prevAttribs[ai];
+                    if (attr.buffer) {
+                        gl.bindBuffer(gl.ARRAY_BUFFER, attr.buffer);
+                        gl.vertexAttribPointer(ai, attr.size, attr.type, attr.normalized, attr.stride, attr.offset);
+                    }
+                    if (attr.enabled) gl.enableVertexAttribArray(ai); else gl.disableVertexAttribArray(ai);
+                }
                 gl.bindBuffer(gl.ARRAY_BUFFER, prevBuf);
                 gl.useProgram(prevProg);
+                gl.activeTexture(gl.TEXTURE0);
+                gl.bindTexture(gl.TEXTURE_2D, prevTexture0);
+                if (isWebGL2(gl)) gl.bindSampler(0, prevSampler0);
                 gl.activeTexture(prevActive);
                 gl.bindTexture(gl.TEXTURE_2D, prevTex);
                 gl.viewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3]);
@@ -3492,6 +3303,9 @@
     })(global);
 
     if (typeof document !== "undefined") {
-        setTimeout(function () { try { boot(); } catch (eBoot2) {} }, 0);
+        if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
+        else boot();
+        setTimeout(boot, 0);
+        setTimeout(boot, 500);
     }
 })(typeof window !== "undefined" ? window : this);

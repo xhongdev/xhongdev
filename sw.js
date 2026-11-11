@@ -1,5 +1,5 @@
 const GAME_NAME = "PhigrosLoader-sample";
-const GAME_VERSION = "1.0.0.0";
+const GAME_VERSION = "0.0.0.0";
 
 const CACHE_NAME = JSON.stringify({"name": GAME_NAME, "version": GAME_VERSION});
 const CACHE_FILES = ["game.unx",
@@ -8,6 +8,7 @@ const CACHE_FILES = ["game.unx",
 "PhigrosLoader_sample.js",
 "PhigrosLoader_sample.wasm",
 "resource/audiogroup_hitsounds.dat",
+"resource/blockareagroup_0.yytex",
 "resource/defaultnotes_0.yytex",
 "resource/defaultnotes_1.yytex",
 "resource/defaultnotes_2.yytex"
