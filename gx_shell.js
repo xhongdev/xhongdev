@@ -8,6 +8,85 @@
         || (navigator.maxTouchPoints > 1 && /Macintosh/i.test(navigator.userAgent));
     var picking = false, pending = null, gate, button, entered = false, blocked = false;
     var locale = /^zh\b/i.test(navigator.language) ? "zh-CN" : "en-US";
+    var inputEvents = [], keyPresses = [], keys = {}, contacts = {}, generation = 0;
+    var resizeQueued = false;
+    function resetInput() {
+        inputEvents = []; keyPresses = []; keys = {}; contacts = {}; generation++;
+    }
+    function focusCanvas() {
+        var canvas = d.getElementById("canvas");
+        if (canvas) { canvas.tabIndex = 0; canvas.focus({ preventScroll:true }); }
+    }
+    function resizeCanvas() {
+        var canvas = d.getElementById("canvas"), module = g.Module;
+        if (!canvas || !canvas.classList.contains("active") || !module || !module.phiResizeCanvas) return;
+        var rect = canvas.getBoundingClientRect(), ratio = g.devicePixelRatio || 1;
+        if (rect.width < 1 || rect.height < 1) return;
+        var gl = module.phiGLContext && module.phiGLContext();
+        var limit = gl ? gl.getParameter(gl.MAX_RENDERBUFFER_SIZE) : 8192;
+        ratio = Math.min(ratio, limit / rect.width, limit / rect.height);
+        var width = Math.max(1, Math.round(rect.width * ratio)), height = Math.max(1, Math.round(rect.height * ratio));
+        if (canvas.width !== width || canvas.height !== height) {
+            module.phiResizeCanvas(width, height);
+            canvas.style.width = rect.width + "px";
+            canvas.style.height = rect.height + "px";
+        }
+    }
+    function scheduleCanvasResize() {
+        if (resizeQueued) return;
+        resizeQueued = true;
+        g.requestAnimationFrame(function () { resizeQueued = false; resizeCanvas(); });
+    }
+    function pollInput() {
+        var now = performance.now(), focused = !d.hidden && !picking && !blocked && d.hasFocus();
+        if (!focused) resetInput();
+        var packet = { generation:generation, focused:focused,
+            keys:Object.keys(keys).map(Number), presses:keyPresses.map(function (e) { return [e[0], Math.max(0, now-e[1])]; }),
+            events:inputEvents.map(function (e) { return [e[0],e[1],e[2],e[3],Math.max(0,now-e[4])]; }) };
+        inputEvents = []; keyPresses = [];
+        return JSON.stringify(packet);
+    }
+    function installInput() {
+        function editable(target) { return target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT|BUTTON)$/.test(target.tagName)); }
+        d.addEventListener("keydown", function (ev) {
+            if (editable(ev.target) || blocked || picking) return;
+            var code = /^Key[A-Z]$/.test(ev.code) ? ev.code.charCodeAt(3) : ev.keyCode;
+            if (code < 65 || code > 90) return;
+            if (!keys[code] && !ev.repeat) keyPresses.push([code,performance.now()]);
+            keys[code] = true; ev.preventDefault();
+        }, true);
+        d.addEventListener("keyup", function (ev) {
+            var code = /^Key[A-Z]$/.test(ev.code) ? ev.code.charCodeAt(3) : ev.keyCode;
+            delete keys[code];
+        }, true);
+        function pointer(ev, kind) {
+            var canvas = d.getElementById("canvas");
+            if (!canvas || blocked || picking) return;
+            if (kind === 1) {
+                if (ev.target !== canvas || ev.button > 0) return;
+                focusCanvas(); contacts[ev.pointerId] = true;
+                try { canvas.setPointerCapture(ev.pointerId); } catch (err) {}
+            } else if (!contacts[ev.pointerId]) return;
+            var rect = canvas.getBoundingClientRect();
+            var stamp = ev.timeStamp;
+            if (!isFinite(stamp) || Math.abs(stamp-performance.now()) > 60000) stamp = performance.now();
+            inputEvents.push([kind,ev.pointerId,(ev.clientX-rect.left)/Math.max(1,rect.width),(ev.clientY-rect.top)/Math.max(1,rect.height),stamp]);
+            if (inputEvents.length > 4096) resetInput();
+            if (kind === 3) delete contacts[ev.pointerId];
+            if (ev.pointerType !== "mouse" && ev.cancelable) ev.preventDefault();
+        }
+        d.addEventListener("pointerdown", function (ev) { pointer(ev,1); }, {capture:true,passive:false});
+        d.addEventListener("pointermove", function (ev) {
+            var samples = ev.getCoalescedEvents ? ev.getCoalescedEvents() : [];
+            if (!samples.length) samples = [ev];
+            for (var i=0;i<samples.length;i++) pointer(samples[i],2);
+        }, {capture:true,passive:false});
+        d.addEventListener("pointerup", function (ev) { pointer(ev,3); }, {capture:true,passive:false});
+        d.addEventListener("pointercancel", resetInput, true);
+        g.addEventListener("blur", resetInput);
+        d.addEventListener("visibilitychange", function () { if (d.hidden) resetInput(); });
+        d.addEventListener("pls-gx-fullscreen", function (ev) { if (ev.detail.suspended) resetInput(); });
+    }
     function zh() { return locale === "zh-CN"; }
     function fullscreen() {
         return !!(d.fullscreenElement || d.webkitFullscreenElement
@@ -59,14 +138,15 @@
                     screen.orientation.lock("landscape").catch(function () {});
                 }
                 return entered;
-            }, function () { return false; }).finally(function () { pending = null; render(); resize(); });
+            }, function () { return false; }).finally(function () { pending = null; render(); resize(); if (fullscreen()) focusCanvas(); });
             return pending;
         } catch (err) { render(); return Promise.resolve(false); }
     }
-    function pickerOpened() { picking = true; render(); }
+    function pickerOpened() { picking = true; resetInput(); render(); }
     function pickerReturned() {
         if (!picking) return;
         picking = false;
+        focusCanvas();
         render();
         // Some browsers retain activation through change/cancel; others require
         // the visible recovery button. Both paths check the actual DOM state.
@@ -74,6 +154,15 @@
         setTimeout(function () { render(); resize(); }, 150);
     }
     function init() {
+        installInput();
+        // The runner also changes canvas attributes after fullscreen callbacks.
+        // Reconcile those later writes through Emscripten's resize listeners.
+        var canvas = d.getElementById("canvas");
+        if (canvas) {
+            new MutationObserver(scheduleCanvasResize).observe(canvas,
+                {attributes:true,attributeFilter:["width","height","class"]});
+            if (g.ResizeObserver) new ResizeObserver(scheduleCanvasResize).observe(canvas);
+        }
         var style = d.createElement("style");
         style.textContent = "html,body{margin:0!important;padding:0!important;background:#080d18;overflow:hidden;width:100%;height:100%;min-width:0!important;min-height:0!important}"
             + "body{height:100dvh}canvas#canvas{max-width:100vw;max-height:100dvh;touch-action:none}"
@@ -120,7 +209,8 @@
         if (mobile) request();
     }
     g.PhiGX = { isMobile: mobile, fullscreen: fullscreen, requestFullscreen: request,
-        runtimeReady: function () { render(true); },
+        runtimeReady: function () { render(true); resize(); focusCanvas(); },
+        resizeCanvas:resizeCanvas, pollInput:pollInput, resetInput:resetInput,
         suspended: function () { return mobile && (picking || !fullscreen()); },
         pickerOpened: pickerOpened, pickerReturned: pickerReturned,
         setLocale: function (value) { locale = value === "zh-CN" ? "zh-CN" : "en-US"; render(); } };

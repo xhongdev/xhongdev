@@ -854,11 +854,11 @@
 
       function manifestFilesMD5()
       {
-        return [ "12ca5fe16d8a209d1df73aa57f9be60c",
-"65eceed2a903f4308b41cf7ffcb534f2",
+        return [ "f4728893c86c5f674c7a5aec5487983b",
+"258d3f4f7ecebd29476b0dfc7e1359f3",
 "2d1f5e94325c715e512a9fb9b44caa9b",
-"0af4c88ea1eaba0b4d3be3d7d510a706",
-"a36c05e346039be0141a427577c8ce55",
+"da5eac974230d7171541b58f617936ad",
+"1aa6cf0b039a7dc9ccabdaea0ce19da1",
 "6ca6e81b3799a92f7ecd283791ab3c3f",
 "78c0896dc029c172ccd25381404739e6",
 "5b77717b89945664345ae8fe5d7bd669",
@@ -973,6 +973,7 @@
 
         canvasElement.style.height = newHeight + "px";
         canvasElement.style.width = newWidth + "px";
+        if (window.PhiGX) PhiGX.resizeCanvas();
       }
 
       function pause() { // Don't change the name - GX Mobile calls it when the app becomes inactive.
@@ -1556,10 +1557,10 @@
       }
     </script>
     <script id="pls-gx-static-build">window.__plsGXRemoteBuild=true;var plsFirstFrame=onFirstFrameRendered;onFirstFrameRendered=function(){plsFirstFrame();if(window.PhiGX)PhiGX.runtimeReady();};</script>
-<script src="gx_shell.js?v=b58f6bcc6802"></script>
-<script src="gx_audio_boot.js?v=b58f6bcc6802"></script>
-<script src="gx_drop.js?v=b58f6bcc6802"></script>
-<script src="gx_video_boot.js?v=b58f6bcc6802"></script>
+<script src="gx_shell.js?v=60ccd4dd7b13"></script>
+<script src="gx_audio_boot.js?v=60ccd4dd7b13"></script>
+<script src="gx_drop.js?v=60ccd4dd7b13"></script>
+<script src="gx_video_boot.js?v=60ccd4dd7b13"></script>
 <script async type="text/javascript" src="PhigrosLoader_sample.js"></script>
 
     <!-- Custom BodyEnd code is injected here -->

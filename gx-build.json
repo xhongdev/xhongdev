@@ -3,15 +3,15 @@
   "runtime": "YYC",
   "mode": "remote",
   "emsdk": "3.1.47",
-  "created": "2026-11-11T18:01:19.263Z",
+  "created": "2026-11-12T06:04:40.706Z",
   "files": {
-    "PhigrosLoader_sample.wasm": "a97b0a0c4eab7943a92fc221647fe12f3cb7a99d5a14958bfd503e74adc16f07",
-    "PhigrosLoader_sample.js": "9252717f0bd95948e70623ca9ef441cb7adb4ebe9ffd768e9afa761c6ce930a9",
-    "PhigrosLoader_sample.data": "8c9a8ec24aa8e98b4f641324c1247c0e1d6e8a112b828460a0bb0ba24fa16077",
-    "index.html": "7aef508201bfcf919c6e3a37486312d4cea2bbd1ce5ff9b551f4c39e6602ad4b",
-    "gx_drop.js": "5eb2f3c28f2b1167336a4c7d7499d94076824a0b7ce17739fc47e7122ab430ad",
-    "gx_shell.js": "30032d02622b7c048f400d44a9a2cfacd50259ea2d8f6fdd223392f7a465bb4e",
+    "PhigrosLoader_sample.wasm": "d9e3e7d660b8eb20ebdad2b487bf1f0c37210c009793ce7a79372b4a485e7653",
+    "PhigrosLoader_sample.js": "dc74d7b973b0ce4ad180a0bec4dbb96ea1c54191226be6a62b0fb6e81caa8a67",
+    "PhigrosLoader_sample.data": "84a2fc3209bf7ce7c9da4407d02aa83011ba685bd610aa2b98d1fdce57eae983",
+    "index.html": "d45624a07d15facd339705d5ae888e3534347c5f93404c2932db7650b62deee7",
+    "gx_drop.js": "f10e031d20fb177658f13053761a1bee146f7c746094421c6a6356bf9bdcfeda",
+    "gx_shell.js": "c74f128e64e8165f6828e784aa9343591bb529a53a67d39c6ae6f6cf147a1b09",
     "gx_audio_boot.js": "277e59b4e85b1f38da9cb5273a020ecac6e88a8f92a8a30e1ac75b6a18b39fea",
-    "gx_video_boot.js": "f4ca1ee137190f6051e8c47122c37369f5d6b15a165560d97db2ec552e587349"
+    "gx_video_boot.js": "2d8887cc88ac336f09090ce5b577c601f6147f0edb9d37b20e51d83799adc4e2"
   }
 }

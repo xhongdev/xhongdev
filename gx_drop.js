@@ -693,6 +693,30 @@
         return lastHeadText.length;
     }
 
+    // Inspect structural keys throughout the JSON. A long BPM list can put
+    // META in the middle of a multi-megabyte RPE file.
+    function chartFormat(raw) {
+        if (openReadPath(raw) <= 0 || !readFileBytes) return 0;
+        var encoding = readFileBytes[0] === 255 && readFileBytes[1] === 254 ? "utf-16le"
+            : readFileBytes[0] === 254 && readFileBytes[1] === 255 ? "utf-16be" : "utf-8";
+        var text = new TextDecoder(encoding).decode(readFileBytes);
+        var depth = 0, keys = {};
+        for (var i = 0; i < text.length; i++) {
+            var ch = text[i];
+            if (ch === '"') {
+                var start = ++i;
+                while (i < text.length && text[i] !== '"') { if (text[i] === '\\') i++; i++; }
+                var end = i, next = i + 1;
+                while (next < text.length && /\s/.test(text[next])) next++;
+                if (depth === 1 && text[next] === ':') keys[text.slice(start, end)] = true;
+            } else if (ch === '{' || ch === '[') depth++;
+            else if (ch === '}' || ch === ']') depth--;
+        }
+        if (keys.judgeLineList && keys.BPMList && keys.META) return 2;
+        if (keys.formatVersion && keys.judgeLineList) return 1;
+        return 0;
+    }
+
     function wipeGxVideos() {
         var n = 0;
         try {
@@ -708,6 +732,8 @@
                 n = 1;
             }
         } catch (e3) {}
+        Object.keys(rpcVideoUrls || {}).forEach(function (id) { URL.revokeObjectURL(rpcVideoUrls[id]); });
+        rpcVideoUrls = {};
         return n > 0 ? 1 : 1;
     }
 
@@ -1193,6 +1219,8 @@
         return 1;
     }
 
+
+
     function boot() {
         if (typeof document === "undefined") return 0;
         hideOverlayFileInput();
@@ -1225,7 +1253,7 @@
             "i_gx_video_end", "i_gx_video_play", "i_gx_video_pause", "i_gx_video_stop",
             "i_gx_video_seek_ms", "i_gx_video_get_position_ms", "i_gx_video_get_length_ms",
             "i_gx_video_get_width", "i_gx_video_get_height", "i_gx_video_get_status",
-            "i_gx_video_draw", "i_gx_video_set_loop", "i_gx_video_release", "i_gx_video_last_error",
+            "i_gx_video_draw", "i_gx_video_set_loop", "i_gx_video_set_volume", "i_gx_video_release", "i_gx_video_last_error",
             "i_gx_video_shutdown"
         ];
         for (var i = 0; i < names.length; i++) {
@@ -1324,6 +1352,9 @@
                 case "fopen": return openReadPath(parts[1] || "");
                 case "fread": return makeReadChunk(num(1), num(2));
                 case "head": return makeHeadText(parts[1] || "");
+                case "format": return chartFormat(parts[1] || "");
+                case "inputreset": if (global.PhiGX) global.PhiGX.resetInput(); return 1;
+                case "inputdebug": if (global.PhiGX) global.PhiGX.inputDebug = JSON.parse(parts[1]); return 1;
                 case "sync": persistFs(); return 1;
                 case "locale": if (global.PhiGX) global.PhiGX.setLocale(parts[1]); return 1;
                 case "skinstat": return state.kind === "skin" ? state.status : 0;
@@ -1381,6 +1412,7 @@
         }
     }
 
+    var rpcVideoUrls = {};
     function videoRpcNum(raw) {
         var s = toStr(raw);
         if (s.indexOf("pls-v:") !== 0) return null;
@@ -1391,7 +1423,16 @@
         try {
             switch (op) {
                 case "ping": return (typeof global.i_gx_video_create === "function") ? 1 : 0;
-                case "create": return toNum(global.i_gx_video_create(arg(1)));
+                case "create": {
+                    var path = arg(1), src = mediaSrc(path);
+                    if (!src) return 0;
+                    var handle = toNum(global.i_gx_video_create(src));
+                    if (src !== path && src.indexOf("blob:") === 0) {
+                        if (handle > 0) rpcVideoUrls[handle] = src;
+                        else URL.revokeObjectURL(src);
+                    }
+                    return handle;
+                }
                 case "begin": return toNum(global.i_gx_video_begin(arg(1)));
                 case "append": return toNum(global.i_gx_video_append(num(1), arg(2)));
                 case "end": return toNum(global.i_gx_video_end(num(1)));
@@ -1405,8 +1446,14 @@
                 case "h": return toNum(global.i_gx_video_get_height(num(1)));
                 case "st": return toNum(global.i_gx_video_get_status(num(1)));
                 case "loop": return toNum(global.i_gx_video_set_loop(num(1), num(2)));
+                case "volume": return toNum(global.i_gx_video_set_volume(num(1), num(2)));
                 case "draw": return toNum(global.i_gx_video_draw(num(1), num(2), num(3), num(4), num(5), num(6), num(7)));
-                case "rel": return toNum(global.i_gx_video_release(num(1)));
+                case "rel": {
+                    var result = toNum(global.i_gx_video_release(num(1)));
+                    if (rpcVideoUrls[num(1)]) URL.revokeObjectURL(rpcVideoUrls[num(1)]);
+                    delete rpcVideoUrls[num(1)];
+                    return result;
+                }
                 case "wipe":
                 case "shutdown": return wipeGxVideos();
                 default: return 0;
@@ -1563,6 +1610,10 @@
         if (p.slice(-5) === ".flac") return "audio/flac";
         if (p.slice(-4) === ".m4a") return "audio/mp4";
         if (p.slice(-4) === ".aac") return "audio/aac";
+        if (p.slice(-4) === ".mp4" || p.slice(-4) === ".m4v") return "video/mp4";
+        if (p.slice(-5) === ".webm") return "video/webm";
+        if (p.slice(-4) === ".ogv") return "video/ogg";
+        if (p.slice(-4) === ".mov") return "video/quicktime";
         return "application/octet-stream";
     }
 
@@ -1847,6 +1898,11 @@
     global.i_gx_query_get = function (key) {
         var k = toStr(key);
         if (k === "pls-r:mode" || k === "pls-f:mode") return isRemoteMode() ? "1" : "0";
+        if (k === "pls-i:poll") return global.PhiGX ? global.PhiGX.pollInput() : "";
+        if (k === "pls-w:width" || k === "pls-w:height") {
+            var displayCanvas = document.getElementById("canvas");
+            return displayCanvas ? String(k === "pls-w:width" ? displayCanvas.width : displayCanvas.height) : "0";
+        }
         if (k === "pls-f:drop") return dropLayerOpen ? "1" : "0";
         if (k === "pls-f:path") return state.importedPath || "";
         if (k === "pls-f:unziperr") return lastUnzipError || "";
@@ -1993,24 +2049,25 @@
     exportDropApi();
 
     (function installGxVideo(g) {
+        "use strict";
         if (!g) return;
-        var videoNames = [
-            "i_gx_video_ping", "i_gx_video_create", "i_gx_video_begin", "i_gx_video_append",
-            "i_gx_video_end", "i_gx_video_play", "i_gx_video_pause", "i_gx_video_stop",
-            "i_gx_video_seek_ms", "i_gx_video_get_position_ms", "i_gx_video_get_length_ms",
-            "i_gx_video_get_width", "i_gx_video_get_height", "i_gx_video_get_status",
-            "i_gx_video_draw", "i_gx_video_set_loop", "i_gx_video_release", "i_gx_video_last_error",
-            "i_gx_video_shutdown"
-        ];
-        function bindVideo(name, fn) {
+        function bind(name, fn) {
             exportGx(name, fn);
-            try { if (typeof window !== "undefined") window[name] = fn; } catch (e0) {}
+            g[name] = fn;
+            try { if (typeof Da !== "undefined" && Da) Da[name] = fn; } catch (e0) {}
+            try { if (typeof window !== "undefined") window[name] = fn; } catch (e1) {}
         }
-        var already = 0;
-        try { already = (typeof g.i_gx_video_ping === "function" && g.i_gx_video_ping() > 0) ? 1 : 0; } catch (e1) {}
-        if (already) {
-            for (var vi = 0; vi < videoNames.length; vi++) {
-                if (typeof g[videoNames[vi]] === "function") bindVideo(videoNames[vi], g[videoNames[vi]]);
+        if (g.__plsVideoBoot) {
+            var names = [
+                "i_gx_video_ping", "i_gx_video_create", "i_gx_video_begin", "i_gx_video_append",
+                "i_gx_video_end", "i_gx_video_play", "i_gx_video_pause", "i_gx_video_stop",
+                "i_gx_video_seek_ms", "i_gx_video_get_position_ms", "i_gx_video_get_length_ms",
+                "i_gx_video_get_width", "i_gx_video_get_height", "i_gx_video_get_status",
+                "i_gx_video_draw", "i_gx_video_set_loop", "i_gx_video_set_volume", "i_gx_video_release", "i_gx_video_last_error",
+                "i_gx_video_shutdown"
+            ];
+            for (var ni = 0; ni < names.length; ni++) {
+                if (typeof g[names[ni]] === "function") bind(names[ni], g[names[ni]]);
             }
             return;
         }
@@ -2026,6 +2083,7 @@
         var ST_PLAY = 2;
         var ST_PAUSE = 3;
         var ST_ENDED = 4;
+
         function mimeFromPath(p) {
             p = String(p || "").split("?")[0].toLowerCase();
             if (p.indexOf("data:video/") === 0) {
@@ -2039,12 +2097,14 @@
             if (p.slice(-4) === ".mkv") return "video/x-matroska";
             return "video/mp4";
         }
+
         function b64u8(b64) {
             var bin = atob(String(b64 || ""));
             var u = new Uint8Array(bin.length);
             for (var i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i) & 255;
             return u;
         }
+
         function makeVideo() {
             var el = document.createElement("video");
             el.muted = true;
@@ -2054,26 +2114,30 @@
             el.controls = false;
             el.playsInline = true;
             el.preload = "auto";
-            try { el.crossOrigin = "anonymous"; } catch (e0) {}
-            try { el.disablePictureInPicture = true; } catch (e1) {}
+            el.crossOrigin = "anonymous";
+            el.disablePictureInPicture = true;
             el.setAttribute("playsinline", "");
             el.setAttribute("webkit-playsinline", "");
             el.setAttribute("muted", "");
             el.setAttribute("data-pls-gx-video", "1");
             el.style.cssText = "position:fixed;left:0;top:0;width:1px;height:1px;opacity:0;pointer-events:none;z-index:-1;border:0;";
-            try { (document.body || document.documentElement).appendChild(el); } catch (e2) {}
+            try { (document.body || document.documentElement).appendChild(el); } catch (e0) {}
             return el;
         }
+
         function revoke(s) {
-            if (!s || !s.objectUrl) return;
-            try { URL.revokeObjectURL(s.objectUrl); } catch (e0) {}
-            s.objectUrl = "";
+            if (!s) return;
+            if (s.objectUrl) {
+                try { URL.revokeObjectURL(s.objectUrl); } catch (e0) {}
+                s.objectUrl = "";
+            }
         }
+
         function attachSrc(s, url, mime) {
             if (!s.el) s.el = makeVideo();
             var el = s.el;
-            el.muted = true;
-            el.volume = 0;
+            el.muted = !(s.volume > 0);
+            el.volume = s.volume || 0;
             s.srcUrl = String(url || "");
             s.mime = mime || mimeFromPath(s.srcUrl);
             try { el.pause(); } catch (e0) {}
@@ -2081,29 +2145,61 @@
             el.src = s.srcUrl;
             try { el.load(); } catch (e2) {}
             if (s.want && !pageHidden) {
-                var p = el.play();
-                if (p && p.catch) p.catch(function () {});
+                tryPlay(s);
             }
             return 1;
         }
-        function slotOf(id) { return slots[id | 0]; }
+
+        function slotOf(id) {
+            return slots[id | 0];
+        }
+
+        function tryPlay(s) {
+            if (!s || !s.el || !s.want || pageHidden || s.playPending) return;
+            s.el.volume = s.volume || 0;
+            s.el.muted = !(s.volume > 0);
+            s.playPending = true;
+            var p = s.el.play();
+            Promise.resolve(p).then(function () {
+                s.blocked = false;
+                if (s.playGate) { s.playGate.remove(); s.playGate = null; }
+            }, function (err) {
+                if (err.name !== "NotAllowedError" || !s.want) return;
+                s.blocked = true;
+                if (s.playGate) return;
+                var button = document.createElement("button");
+                button.textContent = /^zh/i.test(navigator.language) ? "点击播放解锁视频" : "Tap to play unlock video";
+                button.style.cssText = "position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:2147483645;padding:20px 30px;background:#213b60;color:white;border:1px solid #7c9bc3;border-radius:10px;font:20px system-ui;cursor:pointer";
+                button.addEventListener("click", function () { tryPlay(s); });
+                document.body.appendChild(button); s.playGate = button;
+            }).finally(function () { s.playPending = false; });
+        }
+
         function statusOf(s) {
             if (!s || !s.el) return ST_CLOSED;
             var el = s.el;
-            if (el.error) { lastErr = "video error"; return ST_ERROR; }
+            if (el.error) {
+                lastErr = "video error";
+                return ST_ERROR;
+            }
             if (el.ended) return ST_ENDED;
+            if (s.blocked) return 5; // Waiting for the browser's required user gesture.
             if (el.readyState < 2) return ST_PREP;
             if (el.paused) return ST_PAUSE;
             return ST_PLAY;
         }
+
         function pauseAll() {
             var ids = Object.keys(slots);
             for (var i = 0; i < ids.length; i++) {
                 var s = slots[ids[i]];
-                if (s && s.el) { try { s.el.pause(); } catch (e0) {} }
+                if (!s || !s.el) continue;
+                try { s.el.pause(); } catch (e0) {}
             }
         }
+
         function onPageHidden(hidden) {
+            hidden = hidden || !!(g.PhiGX && g.PhiGX.suspended());
             pageHidden = hidden ? 1 : 0;
             if (hidden) pauseAll();
             else {
@@ -2111,29 +2207,48 @@
                 for (var i = 0; i < ids.length; i++) {
                     var s = slots[ids[i]];
                     if (!s || !s.el || !s.want) continue;
-                    var p = s.el.play();
-                    if (p && p.catch) p.catch(function () {});
+                    tryPlay(s);
                 }
             }
         }
+
         if (typeof document !== "undefined") {
-            document.addEventListener("visibilitychange", function () { onPageHidden(!!document.hidden); }, true);
+            function activateVideos() {
+                Object.keys(slots).forEach(function (id) { var s=slots[id]; if (s.blocked) tryPlay(s); });
+            }
+            document.addEventListener("pointerup", activateVideos, true);
+            document.addEventListener("keydown", activateVideos, true);
+            document.addEventListener("visibilitychange", function () {
+                onPageHidden(!!document.hidden);
+            }, true);
+            document.addEventListener("pls-gx-fullscreen", function (ev) { onPageHidden(document.hidden || ev.detail.suspended); });
             document.addEventListener("pagehide", function () { onPageHidden(true); }, true);
             document.addEventListener("pageshow", function () { onPageHidden(false); }, true);
+            document.addEventListener("freeze", function () { onPageHidden(true); }, true);
+            document.addEventListener("resume", function () { onPageHidden(false); }, true);
         }
+
         function getGL() {
-            try { if (g.Module && typeof g.Module.phiGLContext === "function") return g.Module.phiGLContext(); } catch (eExport) {}
-            try { if (typeof GLctx !== "undefined" && GLctx && GLctx.drawArrays) return GLctx; } catch (e0) {}
             try {
-                if (typeof GL !== "undefined" && GL && GL.currentContext) return GL.currentContext.GLctx || GL.currentContext;
+                if (typeof GLctx !== "undefined" && GLctx && GLctx.drawArrays) return GLctx;
+            } catch (e0) {}
+            try {
+                if (typeof GL !== "undefined" && GL && GL.currentContext) {
+                    return GL.currentContext.GLctx || GL.currentContext;
+                }
             } catch (e1) {}
-            try { if (g.Module && g.Module.ctx && g.Module.ctx.drawArrays) return g.Module.ctx; } catch (e2) {}
+            try {
+                if (g.Module && g.Module.ctx && g.Module.ctx.drawArrays) return g.Module.ctx;
+            } catch (e2) {}
             try {
                 var canvas = document.getElementById("canvas") || document.querySelector("canvas");
-                if (canvas) return canvas.getContext("webgl2") || canvas.getContext("webgl") || canvas.getContext("experimental-webgl");
+                if (canvas) {
+                    return canvas.getContext("webgl2") || canvas.getContext("webgl") || canvas.getContext("experimental-webgl");
+                }
             } catch (e3) {}
             return null;
         }
+
         function compile(gl, type, src) {
             var sh = gl.createShader(type);
             gl.shaderSource(sh, src);
@@ -2145,10 +2260,31 @@
             }
             return sh;
         }
+
         function ensureGL(gl) {
             if (glPack && glPack.gl === gl && glPack.prog) return glPack;
-            var vs = compile(gl, gl.VERTEX_SHADER, "attribute vec2 a_pos;attribute vec2 a_uv;varying vec2 v_uv;void main(){gl_Position=vec4(a_pos,0.0,1.0);v_uv=a_uv;}");
-            var fs = compile(gl, gl.FRAGMENT_SHADER, "precision mediump float;varying vec2 v_uv;uniform sampler2D u_tex;uniform float u_alpha;uniform float u_dim;void main(){vec4 c=texture2D(u_tex,v_uv);c.rgb*=(1.0-u_dim);c.a*=u_alpha;gl_FragColor=c;}");
+            var vs = compile(gl, gl.VERTEX_SHADER, [
+                "attribute vec2 a_pos;",
+                "attribute vec2 a_uv;",
+                "varying vec2 v_uv;",
+                "void main(){",
+                "  gl_Position=vec4(a_pos,0.0,1.0);",
+                "  v_uv=a_uv;",
+                "}"
+            ].join("\n"));
+            var fs = compile(gl, gl.FRAGMENT_SHADER, [
+                "precision mediump float;",
+                "varying vec2 v_uv;",
+                "uniform sampler2D u_tex;",
+                "uniform float u_alpha;",
+                "uniform float u_dim;",
+                "void main(){",
+                "  vec4 c=texture2D(u_tex,v_uv);",
+                "  c.rgb*=(1.0-u_dim);",
+                "  c.a*=u_alpha;",
+                "  gl_FragColor=c;",
+                "}"
+            ].join("\n"));
             if (!vs || !fs) return null;
             var prog = gl.createProgram();
             gl.attachShader(prog, vs);
@@ -2156,14 +2292,31 @@
             gl.bindAttribLocation(prog, 0, "a_pos");
             gl.bindAttribLocation(prog, 1, "a_uv");
             gl.linkProgram(prog);
-            if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) { lastErr = "shader link"; return null; }
+            if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+                lastErr = "shader link";
+                return null;
+            }
             var buf = gl.createBuffer();
             var tex = gl.createTexture();
             var vao = null;
-            try { if (typeof gl.createVertexArray === "function") vao = gl.createVertexArray(); } catch (e0) {}
-            glPack = { gl: gl, prog: prog, buf: buf, tex: tex, vao: vao, locPos: gl.getAttribLocation(prog, "a_pos"), locUv: gl.getAttribLocation(prog, "a_uv"), locTex: gl.getUniformLocation(prog, "u_tex"), locAlpha: gl.getUniformLocation(prog, "u_alpha"), locDim: gl.getUniformLocation(prog, "u_dim") };
+            try {
+                if (typeof gl.createVertexArray === "function") vao = gl.createVertexArray();
+            } catch (e0) {}
+            glPack = {
+                gl: gl,
+                prog: prog,
+                buf: buf,
+                tex: tex,
+                vao: vao,
+                locPos: gl.getAttribLocation(prog, "a_pos"),
+                locUv: gl.getAttribLocation(prog, "a_uv"),
+                locTex: gl.getUniformLocation(prog, "u_tex"),
+                locAlpha: gl.getUniformLocation(prog, "u_alpha"),
+                locDim: gl.getUniformLocation(prog, "u_dim")
+            };
             return glPack;
         }
+
         function corsRetry(s) {
             if (!s || s.corsTried) return;
             var src = String(s.srcUrl || "");
@@ -2175,9 +2328,14 @@
                     var url = URL.createObjectURL(blob);
                     s.objectUrl = url;
                     attachSrc(s, url, blob.type || s.mime);
-                }).catch(function () { lastErr = "video cors fetch failed"; });
-            } catch (e0) { lastErr = "video cors retry failed"; }
+                }).catch(function () {
+                    lastErr = "video cors fetch failed";
+                });
+            } catch (e0) {
+                lastErr = "video cors retry failed";
+            }
         }
+
         function drainGL(gl) {
             var n = 0, e = 0, last = 0;
             while (n < 16) {
@@ -2188,6 +2346,7 @@
             }
             return last;
         }
+
         function uploadVideoTex(gl, pack, el) {
             var w = el.videoWidth | 0, h = el.videoHeight | 0;
             if (w <= 0 || h <= 0) return 0;
@@ -2220,29 +2379,6 @@
                 }
                 return false;
             }
-            if (pack.upload === "sub" && pack.texW === w && pack.texH === h) {
-                if (attempt("sub", function () {
-                    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, el);
-                })) return 1;
-            } else if (pack.upload) {
-                var cached = pack.upload;
-                pack.upload = "";
-                if (cached === "rgba8-9" && attempt("rgba8-9", function () {
-                    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8 || 0x8058, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, el);
-                })) return 1;
-                if (cached === "rgba-9" && attempt("rgba-9", function () {
-                    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, el);
-                })) return 1;
-                if (cached === "rgba8-6" && attempt("rgba8-6", function () {
-                    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8 || 0x8058, gl.RGBA, gl.UNSIGNED_BYTE, el);
-                })) return 1;
-                if (cached === "rgba-6" && attempt("rgba-6", function () {
-                    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, el);
-                })) return 1;
-                if (cached === "rgb-9" && attempt("rgb-9", function () {
-                    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, w, h, 0, gl.RGB, gl.UNSIGNED_BYTE, el);
-                })) return 1;
-            }
             var is2 = !!gl.texStorage2D;
             var tries = [];
             if (is2) {
@@ -2252,46 +2388,46 @@
                 tries.push(["rgba-9", function () {
                     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, el);
                 }]);
-                tries.push(["rgba8-6", function () {
-                    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8 || 0x8058, gl.RGBA, gl.UNSIGNED_BYTE, el);
-                }]);
             }
             tries.push(["rgba-6", function () {
                 gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, el);
-            }]);
-            tries.push(["rgb-9", function () {
-                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, w, h, 0, gl.RGB, gl.UNSIGNED_BYTE, el);
-            }]);
-            tries.push(["rgb-6", function () {
-                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, el);
             }]);
             tries.push(["alloc-sub", function () {
                 gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
                 gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, el);
             }]);
+            if (pack.upload) {
+                for (var c = 0; c < tries.length; c++) {
+                    if (tries[c][0] === pack.upload) {
+                        if (attempt(pack.upload, tries[c][1])) return 1;
+                        pack.upload = "";
+                        break;
+                    }
+                }
+            }
             for (var i = 0; i < tries.length; i++) {
                 drainGL(gl);
                 if (attempt(tries[i][0], tries[i][1])) {
-                    if (tries[i][0] === "alloc-sub") pack.upload = "sub";
                     try { console.log("[GXVideo] upload " + pack.upload + " " + w + "x" + h); } catch (eLog) {}
                     return 1;
                 }
             }
             return -1;
         }
+
         function drawVideo(s, left, top, right, bottom, alpha, dim) {
             if (!s || !s.el) return 0;
             if (!(right > left) || !(bottom > top)) return 1;
             var el = s.el;
             if (s.want && el.paused && !pageHidden) {
-                el.muted = true;
-                el.volume = 0;
-                var playp = el.play();
-                if (playp && playp.catch) playp.catch(function () {});
+                if (!s.blocked) tryPlay(s);
             }
             if (el.readyState < 2 || el.videoWidth <= 0 || el.videoHeight <= 0) return 0;
             var gl = getGL();
-            if (!gl) { lastErr = "no webgl"; return -1; }
+            if (!gl) {
+                lastErr = "no webgl";
+                return -1;
+            }
             var pack = ensureGL(gl);
             if (!pack) return -1;
             var prevProg = gl.getParameter(gl.CURRENT_PROGRAM);
@@ -2301,7 +2437,7 @@
             var prevUnpack = null;
             try { if (gl.PIXEL_UNPACK_BUFFER) prevUnpack = gl.getParameter(gl.PIXEL_UNPACK_BUFFER_BINDING); } catch (eU) {}
             var prevVAO = null;
-            try { prevVAO = gl.getParameter(gl.VERTEX_ARRAY_BINDING); } catch (e0) {}
+            try { if (gl.VERTEX_ARRAY_BINDING !== undefined) prevVAO = gl.getParameter(gl.VERTEX_ARRAY_BINDING); } catch (e0) {}
             var prevBlend = gl.isEnabled(gl.BLEND);
             var prevDepth = gl.isEnabled(gl.DEPTH_TEST);
             var prevCull = gl.isEnabled(gl.CULL_FACE);
@@ -2328,10 +2464,17 @@
                 gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
                 if (uploadVideoTex(gl, pack, el) <= 0) {
                     ok = -1;
-                    if (String(lastErr).indexOf("Security") >= 0 || String(lastErr).indexOf("tainted") >= 0) corsRetry(s);
                 } else {
-                    var x1 = left * 2 - 1, x2 = right * 2 - 1, y1 = 1 - top * 2, y2 = 1 - bottom * 2;
-                    var verts = new Float32Array([x1, y1, 0, 0, x2, y1, 1, 0, x1, y2, 0, 1, x2, y2, 1, 1]);
+                    var x1 = left * 2 - 1;
+                    var x2 = right * 2 - 1;
+                    var y1 = 1 - top * 2;
+                    var y2 = 1 - bottom * 2;
+                    var verts = new Float32Array([
+                        x1, y1, 0, 0,
+                        x2, y1, 1, 0,
+                        x1, y2, 0, 1,
+                        x2, y2, 1, 1
+                    ]);
                     gl.bindBuffer(gl.ARRAY_BUFFER, pack.buf);
                     gl.bufferData(gl.ARRAY_BUFFER, verts, gl.DYNAMIC_DRAW);
                     gl.enableVertexAttribArray(pack.locPos);
@@ -2379,30 +2522,45 @@
             } catch (e3) {}
             return ok;
         }
-        bindVideo("i_gx_video_ping", function () { return 1; });
-        try { console.log("[GXVideo] HTMLVideo API bound"); } catch (eLog) {}
-        bindVideo("i_gx_video_last_error", function () { return lastErr || ""; });
-        bindVideo("i_gx_video_begin", function (mime) {
+
+        bind("i_gx_video_ping", function () { return 1; });
+        bind("i_gx_video_last_error", function () { return lastErr || ""; });
+        bind("i_gx_video_begin", function (mime) {
             lastErr = "";
             var id = nextId++;
             slots[id] = { mime: String(mime || "video/mp4"), parts: [], total: 0, want: 0, el: null, objectUrl: "", srcUrl: "", corsTried: 0 };
             return id;
         });
-        bindVideo("i_gx_video_append", function (id, b64) {
+        bind("i_gx_video_append", function (id, b64) {
             var s = slotOf(id);
-            if (!s) { lastErr = "append"; return 0; }
+            if (!s) {
+                lastErr = "append";
+                return 0;
+            }
             var u = b64u8(b64);
-            if (u.length) { s.parts.push(u); s.total += u.length; }
+            if (u.length) {
+                s.parts.push(u);
+                s.total += u.length;
+            }
             return 1;
         });
-        bindVideo("i_gx_video_end", function (id) {
+        bind("i_gx_video_end", function (id) {
             var s = slotOf(id);
-            if (!s) { lastErr = "end"; return 0; }
+            if (!s) {
+                lastErr = "end";
+                return 0;
+            }
             var u = new Uint8Array(s.total);
             var o = 0;
-            for (var i = 0; i < s.parts.length; i++) { u.set(s.parts[i], o); o += s.parts[i].length; }
+            for (var i = 0; i < s.parts.length; i++) {
+                u.set(s.parts[i], o);
+                o += s.parts[i].length;
+            }
             s.parts = [];
-            if (!u.length) { lastErr = "empty"; return 0; }
+            if (!u.length) {
+                lastErr = "empty";
+                return 0;
+            }
             revoke(s);
             var blob = new Blob([u], { type: s.mime || "video/mp4" });
             var url = URL.createObjectURL(blob);
@@ -2410,7 +2568,7 @@
             s.el = s.el || makeVideo();
             return attachSrc(s, url, s.mime);
         });
-        bindVideo("i_gx_video_create", function (path) {
+        bind("i_gx_video_create", function (path) {
             lastErr = "";
             var p = String(path || "");
             var id = nextId++;
@@ -2422,70 +2580,78 @@
             delete slots[id];
             return 0;
         });
-        bindVideo("i_gx_video_play", function (id) {
+        bind("i_gx_video_play", function (id) {
             var s = slotOf(id);
             if (!s || !s.el) return 0;
             s.want = 1;
             if (pageHidden) return 1;
-            s.el.muted = true;
-            s.el.volume = 0;
-            var p = s.el.play();
-            if (p && p.catch) p.catch(function () {});
+            tryPlay(s);
             return 1;
         });
-        bindVideo("i_gx_video_pause", function (id) {
+        bind("i_gx_video_set_volume", function (id, volume) {
+            var s = slotOf(id);
+            if (!s || !s.el) return 0;
+            s.volume = Math.max(0, Math.min(1, Number(volume) || 0));
+            s.el.volume = s.volume; s.el.muted = !(s.volume > 0);
+            return 1;
+        });
+        bind("i_gx_video_pause", function (id) {
             var s = slotOf(id);
             if (!s || !s.el) return 0;
             s.want = 0;
             try { s.el.pause(); } catch (e0) {}
             return 1;
         });
-        bindVideo("i_gx_video_stop", function (id) {
+        bind("i_gx_video_stop", function (id) {
             var s = slotOf(id);
             if (!s || !s.el) return 0;
             s.want = 0;
             try { s.el.pause(); s.el.currentTime = 0; } catch (e0) {}
             return 1;
         });
-        bindVideo("i_gx_video_seek_ms", function (id, ms) {
+        bind("i_gx_video_seek_ms", function (id, ms) {
             var s = slotOf(id);
             if (!s || !s.el) return 0;
-            try { s.el.currentTime = Math.max(0, Number(ms) / 1000); } catch (e0) { return 0; }
+            var sec = Math.max(0, Number(ms) / 1000);
+            try { s.el.currentTime = sec; } catch (e0) { return 0; }
             return 1;
         });
-        bindVideo("i_gx_video_get_position_ms", function (id) {
+        bind("i_gx_video_get_position_ms", function (id) {
             var s = slotOf(id);
             if (!s || !s.el) return 0;
             return (s.el.currentTime || 0) * 1000;
         });
-        bindVideo("i_gx_video_get_length_ms", function (id) {
+        bind("i_gx_video_get_length_ms", function (id) {
             var s = slotOf(id);
             if (!s || !s.el) return 0;
             var d = s.el.duration;
             return isFinite(d) ? d * 1000 : 0;
         });
-        bindVideo("i_gx_video_get_width", function (id) {
+        bind("i_gx_video_get_width", function (id) {
             var s = slotOf(id);
             if (!s || !s.el) return 0;
             return s.el.videoWidth || 0;
         });
-        bindVideo("i_gx_video_get_height", function (id) {
+        bind("i_gx_video_get_height", function (id) {
             var s = slotOf(id);
             if (!s || !s.el) return 0;
             return s.el.videoHeight || 0;
         });
-        bindVideo("i_gx_video_get_status", function (id) { return statusOf(slotOf(id)); });
-        bindVideo("i_gx_video_set_loop", function (id, enabled) {
+        bind("i_gx_video_get_status", function (id) {
+            return statusOf(slotOf(id));
+        });
+        bind("i_gx_video_set_loop", function (id, enabled) {
             var s = slotOf(id);
             if (!s || !s.el) return 0;
             s.el.loop = Number(enabled) > 0;
             return 1;
         });
-        bindVideo("i_gx_video_draw", function (id, left, top, right, bottom, alpha, dim) {
+        bind("i_gx_video_draw", function (id, left, top, right, bottom, alpha, dim) {
             return drawVideo(slotOf(id), Number(left) || 0, Number(top) || 0, Number(right) || 0, Number(bottom) || 0, Number(alpha), Number(dim));
         });
         function releaseSlot(id, s) {
             if (!s) return 0;
+            if (s.playGate) { s.playGate.remove(); s.playGate = null; }
             if (s.el) {
                 try { s.el.pause(); s.el.removeAttribute("src"); s.el.load(); } catch (e0) {}
                 try { if (s.el.parentNode) s.el.parentNode.removeChild(s.el); } catch (e1) {}
@@ -2513,12 +2679,12 @@
             lastErr = "";
             return 1;
         }
-        bindVideo("i_gx_video_release", function (id) {
+        bind("i_gx_video_release", function (id) {
             var s = slotOf(id);
             if (!s) return 0;
             return releaseSlot(id, s);
         });
-        bindVideo("i_gx_video_shutdown", shutdownVideos);
+        bind("i_gx_video_shutdown", shutdownVideos);
     })(global);
 
     (function installGxShader(g) {
@@ -3155,7 +3321,7 @@
             var prevUnpack = null;
             try { if (gl.PIXEL_UNPACK_BUFFER) prevUnpack = gl.getParameter(gl.PIXEL_UNPACK_BUFFER_BINDING); } catch (eU) {}
             var prevVAO = null;
-            try { prevVAO = gl.getParameter(gl.VERTEX_ARRAY_BINDING); } catch (e0) {}
+            try { if (isWebGL2(gl)) prevVAO = gl.getParameter(gl.VERTEX_ARRAY_BINDING); } catch (e0) {}
             var prevAttribs = [];
             if (!quadVao) {
                 for (var ai = 0; ai < 2; ai++) prevAttribs.push({
