@@ -8,10 +8,13 @@
         || (navigator.maxTouchPoints > 1 && /Macintosh/i.test(navigator.userAgent));
     var picking = false, pending = null, gate, button, entered = false, blocked = false;
     var locale = /^zh\b/i.test(navigator.language) ? "zh-CN" : "en-US";
-    var inputEvents = [], keyPresses = [], keys = {}, contacts = {}, generation = 0;
+    var inputEvents = [], keyPresses = [], keys = {}, heldKeys = [], contacts = {}, generation = 0;
+    var idlePacket = null, blurred = false, pageAway = false, frozen = false;
+    var suspendAt = -1, suspendSerial = 0, mediaBlocked = false;
     var resizeQueued = false;
     function resetInput() {
-        inputEvents = []; keyPresses = []; keys = {}; contacts = {}; generation++;
+        inputEvents = []; keyPresses = []; keys = {}; heldKeys = []; contacts = {}; generation++;
+        idlePacket = null;
     }
     function focusCanvas() {
         var canvas = d.getElementById("canvas");
@@ -38,13 +41,18 @@
         g.requestAnimationFrame(function () { resizeQueued = false; resizeCanvas(); });
     }
     function pollInput() {
-        var now = performance.now(), focused = !d.hidden && !picking && !blocked && d.hasFocus();
-        if (!focused) resetInput();
-        var packet = { generation:generation, focused:focused,
-            keys:Object.keys(keys).map(Number), presses:keyPresses.map(function (e) { return [e[0], Math.max(0, now-e[1])]; }),
-            events:inputEvents.map(function (e) { return [e[0],e[1],e[2],e[3],Math.max(0,now-e[4])]; }) };
+        var now = performance.now(), focused = !blocked && !picking && !d.hidden && d.hasFocus();
+        var idle = !inputEvents.length && !keyPresses.length && !mediaBlocked;
+        if (idle && idlePacket !== null) return idlePacket;
+        for (var i=0;i<keyPresses.length;i++) keyPresses[i][1] = Math.max(0,now-keyPresses[i][1]);
+        for (var j=0;j<inputEvents.length;j++) inputEvents[j][4] = Math.max(0,now-inputEvents[j][4]);
+        var packet = { generation:generation, focused:focused, suspended:blocked,
+            suspendSerial:suspendSerial, pausePending:mediaBlocked, suspendAge:suspendAt < 0 ? -1 : Math.max(0,now-suspendAt),
+            keys:heldKeys, presses:keyPresses, events:inputEvents };
         inputEvents = []; keyPresses = [];
-        return JSON.stringify(packet);
+        var json = JSON.stringify(packet);
+        if (idle) idlePacket = json;
+        return json;
     }
     function installInput() {
         function editable(target) { return target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT|BUTTON)$/.test(target.tagName)); }
@@ -52,14 +60,17 @@
             if (editable(ev.target) || blocked || picking) return;
             var code = /^Key[A-Z]$/.test(ev.code) ? ev.code.charCodeAt(3) : ev.keyCode;
             if (code < 65 || code > 90) return;
-            if (!keys[code] && !ev.repeat) keyPresses.push([code,performance.now()]);
-            keys[code] = true; ev.preventDefault();
+            if (!keys[code]) {
+                if (!ev.repeat) keyPresses.push([code,performance.now()]);
+                keys[code] = true; heldKeys.push(code); heldKeys.sort(); idlePacket = null;
+            }
+            ev.preventDefault();
         }, true);
         d.addEventListener("keyup", function (ev) {
             var code = /^Key[A-Z]$/.test(ev.code) ? ev.code.charCodeAt(3) : ev.keyCode;
-            delete keys[code];
+            if (keys[code]) { delete keys[code]; heldKeys.splice(heldKeys.indexOf(code),1); idlePacket = null; }
         }, true);
-        function pointer(ev, kind) {
+        function pointer(ev, kind, samples) {
             var canvas = d.getElementById("canvas");
             if (!canvas || blocked || picking) return;
             if (kind === 1) {
@@ -67,25 +78,26 @@
                 focusCanvas(); contacts[ev.pointerId] = true;
                 try { canvas.setPointerCapture(ev.pointerId); } catch (err) {}
             } else if (!contacts[ev.pointerId]) return;
-            var rect = canvas.getBoundingClientRect();
-            var stamp = ev.timeStamp;
-            if (!isFinite(stamp) || Math.abs(stamp-performance.now()) > 60000) stamp = performance.now();
-            inputEvents.push([kind,ev.pointerId,(ev.clientX-rect.left)/Math.max(1,rect.width),(ev.clientY-rect.top)/Math.max(1,rect.height),stamp]);
+            var rect = canvas.getBoundingClientRect(), now = performance.now();
+            var width = Math.max(1,rect.width), height = Math.max(1,rect.height);
+            if (!samples || !samples.length) samples = [ev];
+            for (var i=0;i<samples.length;i++) {
+                var sample = samples[i], stamp = sample.timeStamp;
+                if (!isFinite(stamp) || Math.abs(stamp-now) > 60000) stamp = now;
+                inputEvents.push([kind,ev.pointerId,(sample.clientX-rect.left)/width,(sample.clientY-rect.top)/height,stamp]);
+            }
             if (inputEvents.length > 4096) resetInput();
             if (kind === 3) delete contacts[ev.pointerId];
             if (ev.pointerType !== "mouse" && ev.cancelable) ev.preventDefault();
         }
         d.addEventListener("pointerdown", function (ev) { pointer(ev,1); }, {capture:true,passive:false});
         d.addEventListener("pointermove", function (ev) {
+            if (!contacts[ev.pointerId] || blocked || picking) return;
             var samples = ev.getCoalescedEvents ? ev.getCoalescedEvents() : [];
-            if (!samples.length) samples = [ev];
-            for (var i=0;i<samples.length;i++) pointer(samples[i],2);
+            pointer(ev,2,samples);
         }, {capture:true,passive:false});
         d.addEventListener("pointerup", function (ev) { pointer(ev,3); }, {capture:true,passive:false});
         d.addEventListener("pointercancel", resetInput, true);
-        g.addEventListener("blur", resetInput);
-        d.addEventListener("visibilitychange", function () { if (d.hidden) resetInput(); });
-        d.addEventListener("pls-gx-fullscreen", function (ev) { if (ev.detail.suspended) resetInput(); });
     }
     function zh() { return locale === "zh-CN"; }
     function fullscreen() {
@@ -102,15 +114,24 @@
     function render(force) {
         if (!gate) return;
         var active = fullscreen();
-        var suspended = mobile && (!active || picking);
+        var suspended = !!(blurred || d.hidden || pageAway || frozen || picking || (mobile && !active));
         if (blocked !== suspended || force === true) {
+            if (suspended && !blocked) {
+                if (!mediaBlocked) { suspendAt = performance.now(); suspendSerial++; mediaBlocked = true; }
+                resetInput();
+            }
+            var wasBlocked = blocked;
             blocked = suspended;
-            d.dispatchEvent(new CustomEvent("pls-gx-fullscreen", { detail: { suspended: blocked } }));
-            var lifecycle = blocked ? g.GM_pause : g.GM_unpause;
+            idlePacket = null;
+            d.dispatchEvent(new CustomEvent("pls-gx-fullscreen", { detail: { suspended: blocked || mediaBlocked } }));
+            // The exported page resume helper also clears the Runner's DOM
+            // pause menu. Gameplay remains paused behind the media barrier.
+            var lifecycle = blocked ? g.GM_pause
+                : (wasBlocked && typeof g.resume === "function" ? g.resume : g.GM_unpause);
             if (typeof lifecycle === "function") lifecycle();
         }
         gate.hidden = !mobile || active || picking;
-        button.hidden = mobile;
+        button.hidden = mobile || active;
         button.textContent = active ? (zh() ? "退出全屏" : "Exit fullscreen") : (zh() ? "全屏" : "Fullscreen");
         var title = gate.querySelector("strong");
         var detail = gate.querySelector("p");
@@ -124,6 +145,11 @@
             : (zh() ? "此浏览器未提供页面全屏功能，请使用支持全屏的浏览器打开。"
                 : "This browser does not provide page fullscreen. Open this page in a browser that supports it.");
         action.disabled = !supported();
+    }
+    function acknowledgePause(serial) {
+        if (Number(serial) !== suspendSerial || !mediaBlocked) return;
+        mediaBlocked = false; idlePacket = null;
+        d.dispatchEvent(new CustomEvent("pls-gx-fullscreen", { detail: { suspended: blocked } }));
     }
     function request() {
         if (fullscreen()) { render(); return Promise.resolve(true); }
@@ -194,10 +220,15 @@
         d.addEventListener("fullscreenchange", changed);
         d.addEventListener("webkitfullscreenchange", changed);
         d.addEventListener("fullscreenerror", render);
-        g.addEventListener("focus", function () { if (picking) setTimeout(pickerReturned, 150); });
-        g.addEventListener("pageshow", function () { render(); resize(); });
+        g.addEventListener("blur", function () { blurred = true; render(); });
+        g.addEventListener("focus", function () { blurred = false; render(); if (picking) setTimeout(pickerReturned, 150); });
+        g.addEventListener("pagehide", function () { pageAway = true; render(); });
+        g.addEventListener("pageshow", function () { pageAway = false; render(); resize(); });
+        d.addEventListener("freeze", function () { frozen = true; render(); });
+        d.addEventListener("resume", function () { frozen = false; render(); });
         d.addEventListener("visibilitychange", function () {
-            if (d.visibilityState === "visible") { if (picking) pickerReturned(); else render(); }
+            if (!d.hidden && picking) pickerReturned();
+            else render();
         });
         d.addEventListener("pointerup", function (ev) {
             if (!mobile || fullscreen() || picking || ev.target.closest("input[type=file]")) return;
@@ -211,7 +242,8 @@
     g.PhiGX = { isMobile: mobile, fullscreen: fullscreen, requestFullscreen: request,
         runtimeReady: function () { render(true); resize(); focusCanvas(); },
         resizeCanvas:resizeCanvas, pollInput:pollInput, resetInput:resetInput,
-        suspended: function () { return mobile && (picking || !fullscreen()); },
+        suspended: function () { return blocked || mediaBlocked; },
+        runtimeSuspended: function () { return blocked; }, acknowledgePause:acknowledgePause,
         pickerOpened: pickerOpened, pickerReturned: pickerReturned,
         setLocale: function (value) { locale = value === "zh-CN" ? "zh-CN" : "en-US"; render(); } };
     if (d.readyState === "loading") d.addEventListener("DOMContentLoaded", init); else init();

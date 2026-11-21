@@ -877,7 +877,7 @@
     }
 
     function unpauseGame(kickLoop) {
-        if (global.PhiGX && global.PhiGX.suspended()) {
+        if (global.PhiGX && global.PhiGX.runtimeSuspended()) {
             if (typeof global.GM_pause === "function") global.GM_pause();
             return;
         }
@@ -1026,13 +1026,15 @@
 
     function applyBox(el, box) {
         if (!el || !box) return;
+        // Clear the full-size picker inset before assigning its button bounds:
+        // setting the shorthand afterwards also resets left and top to auto.
+        el.style.inset = "auto";
         el.style.left = box.x + "px";
         el.style.top = box.y + "px";
         el.style.width = Math.max(0, box.w) + "px";
         el.style.height = Math.max(0, box.h) + "px";
         el.style.right = "auto";
         el.style.bottom = "auto";
-        el.style.inset = "auto";
     }
 
     function roomToCss(x, y, w, h, roomW, roomH) {
@@ -1354,7 +1356,17 @@
                 case "head": return makeHeadText(parts[1] || "");
                 case "format": return chartFormat(parts[1] || "");
                 case "inputreset": if (global.PhiGX) global.PhiGX.resetInput(); return 1;
+                case "inputack": if (global.PhiGX) global.PhiGX.acknowledgePause(num(1)); return 1;
                 case "inputdebug": if (global.PhiGX) global.PhiGX.inputDebug = JSON.parse(parts[1]); return 1;
+                case "vsync": {
+                    var applied = 0;
+                    eachModule(function (module) {
+                        if (typeof module.phiSetVsync !== "function") return;
+                        module.phiSetVsync(num(1) > 0);
+                        applied = 1;
+                    });
+                    return applied;
+                }
                 case "sync": persistFs(); return 1;
                 case "locale": if (global.PhiGX) global.PhiGX.setLocale(parts[1]); return 1;
                 case "skinstat": return state.kind === "skin" ? state.status : 0;
@@ -1410,6 +1422,18 @@
         } catch (e) {
             return 0;
         }
+    }
+
+    function audioRpcNum(raw) {
+        var s = toStr(raw);
+        if (s.indexOf("pls-a:") !== 0) return null;
+        var parts = s.slice(6).split("\t");
+        try {
+            if (parts[0] === "lowpass" && typeof global.i_gx_audio_set_lowpass === "function") {
+                return toNum(global.i_gx_audio_set_lowpass(toNum(parts[1]), toNum(parts[2]), toNum(parts[3])));
+            }
+        } catch (e) {}
+        return 0;
     }
 
     var rpcVideoUrls = {};
@@ -1758,6 +1782,7 @@
         exportGx("i_gx_audio_end", global.i_gx_audio_end);
         exportGx("i_gx_audio_play", global.i_gx_audio_play);
         exportGx("i_gx_audio_set_volume", global.i_gx_audio_set_volume);
+        if (typeof global.i_gx_audio_set_lowpass === "function") exportGx("i_gx_audio_set_lowpass", global.i_gx_audio_set_lowpass);
         exportGx("i_gx_audio_pause", global.i_gx_audio_pause);
         exportGx("i_gx_audio_resume", global.i_gx_audio_resume);
         exportGx("i_gx_audio_stop", global.i_gx_audio_stop);
@@ -1954,7 +1979,7 @@
     };
     global.i_gx_drop_poll_import = function () { pollIndexedDb(); return state.status; };
     global.i_gx_drop_unpause = function () {
-        if (global.PhiGX && global.PhiGX.suspended()) return 0;
+        if (global.PhiGX && global.PhiGX.runtimeSuspended()) return 0;
         hidePauseUi();
         try {
             var gmUnpause = lookupFn("GM_unpause");
@@ -1981,6 +2006,8 @@
         if (remote !== null) return remote;
         var shader = shaderRpcNum(path);
         if (shader !== null) return shader;
+        var audio = audioRpcNum(path);
+        if (audio !== null) return audio;
         var rpc = videoRpcNum(path);
         if (rpc !== null) return rpc;
         if (!state.bytes) return 0;
@@ -2704,6 +2731,7 @@
         var texH = 0;
         var quadBuf = null;
         var quadVao = null;
+        var quadVaoExt = null;
         var quadGl = null;
 
         function setErr(msg) {
@@ -2856,7 +2884,12 @@
             return source;
         }
         function hasVaryingUv(source) {
-            return /(?:varying|in)\s+(?:(?:lowp|mediump|highp)\s+)?vec2\s+uv\b/.test(source);
+            var declarations = /\b(?:varying|in)\s+(?:(?:lowp|mediump|highp)\s+)?vec2\s+([A-Za-z_]\w*(?:\s*\[[^\]]*\])?(?:\s*,\s*[A-Za-z_]\w*(?:\s*\[[^\]]*\])?)*)\s*;/g;
+            var match;
+            while ((match = declarations.exec(source))) {
+                if (/(?:^|,)\s*uv(?:\s*\[[^\]]*\])?\s*(?:,|$)/.test(match[1])) return true;
+            }
+            return false;
         }
         function hasLocalUv(source) {
             return /\bvec2\s+uv\s*=/.test(source);
@@ -2953,9 +2986,89 @@
             }
             return source;
         }
+        function stabilizeFisheye(fragment) {
+            // This common fisheye kernel divides tan(0) / tan(0), or
+            // atan(0) / atan(0), at zero power. A NaN sample can turn the
+            // whole frame into the corner pixel instead of the original.
+            if (!/uniform\s+(?:(?:lowp|mediump|highp)\s+)?float\s+power\s*;/.test(fragment)
+                || !/uniform\s+(?:(?:lowp|mediump|highp)\s+)?sampler2D\s+screenTexture\s*;/.test(fragment)
+                || hasLocalUv(fragment)
+                || !/\bnew_power\b/.test(fragment) || !/\bbind\b/.test(fragment)
+                || !/\btan\s*\(/.test(fragment) || !/\batan\s*\(/.test(fragment)
+                || !/\bnormalize\s*\(\s*d\s*\)/.test(fragment)) return fragment;
+            fragment = insertMainPrelude(fragment,
+                "if (abs(power) < 0.000001) { gl_FragColor = texture2D(screenTexture, uv); return; }\n");
+            // The exact center has no direction, including at nonzero power.
+            return fragment.replace(/\bnormalize\s*\(\s*d\s*\)/g,
+                "(d / max(length(d), 0.000001))");
+        }
+        function optimizeRainLoop(fragment) {
+            // On WebGL 1 the 512-iteration compatibility loop can execute
+            // every rain hash even at density 0. A uniform break avoids that
+            // work for sparse rain. Keep the original path for dense rain:
+            // a dynamic loop is slower there on some ANGLE drivers.
+            if (!/uniform\s+float\s+density\s*;/.test(fragment)) return fragment;
+            var loop = /for\s*\(\s*float\s+i\s*=\s*0\.0\s*;\s*i\s*<\s*density\s*;\s*i\s*\+=\s*1\.0\s*\)\s*\{/.exec(fragment);
+            if (!loop) return fragment;
+            var brace = loop.index + loop[0].length - 1;
+            var end = brace, depth = 0;
+            for (; end < fragment.length; end++) {
+                if (fragment.charAt(end) === "{") depth++;
+                else if (fragment.charAt(end) === "}" && --depth === 0) break;
+            }
+            var body = fragment.slice(brace + 1, end);
+            // Match the kernel rather than a filename. In particular, do not
+            // wrap arbitrary loops whose break/continue targets could change.
+            if (body.replace(/\s+/g, "") !==
+                "vec2dropPos=generateDropPosition(i,i*10.0);"
+                + "if(abs(gl_FragCoord.x-dropPos.x)<dropWidth*screenSize.x"
+                + "&&abs(gl_FragCoord.y-dropPos.y)<dropHeight*screenSize.y)"
+                + "{dropPresent+=1.0;}") return fragment;
+            var sparse = "for (float i = 0.0; i < 512.0; i += 1.0) "
+                + "if (!(i < float(density))) break; else {" + body + "}";
+            return fragment.slice(0, loop.index)
+                + "if (density <= 64.0) {" + sparse + "} else {"
+                + fragment.slice(loop.index, end + 1) + "}"
+                + fragment.slice(end + 1);
+        }
+        function optimizeBokehLoops(fragment) {
+            var loop = /for\s*\(\s*float\s+x\s*=\s*-\s*radius\s*;\s*x\s*<=\s*radius\s*;\s*x\s*\+\+\s*\)\s*\{/.exec(fragment);
+            if (!loop) return fragment;
+            var brace = loop.index + loop[0].length - 1;
+            var end = brace, depth = 0;
+            for (; end < fragment.length; end++) {
+                if (fragment.charAt(end) === '{') depth++;
+                else if (fragment.charAt(end) === '}' && --depth === 0) break;
+            }
+            var body = fragment.slice(brace + 1, end).replace(/\s+/g, '');
+            // Only this exact nested sampling body is eligible. This does not wrap
+            // arbitrary break/continue statements or infer behavior from filenames.
+            if (body !== 'for(floaty=-radius;y<=radius;y++){'
+                + 'vec2offset=vec2(x,y)/screenSize;'
+                + 'floatweight=gaussian(vec2(x,y),radius);'
+                + 'color+=getcolor(uv+offset*intensity)*weight;'
+                + 'total+=weight;}') return fragment;
+            // Match the CURRENT WebGL 1 integer grid, including its +/-32 cap,
+            // and preserve outer-x/inner-y accumulation order and every sample.
+            var replacement = 'float rpe_bokeh_bound = min(floor(radius), 32.0);\n'
+                + 'for (float rpe_bokeh_xi = 0.0; rpe_bokeh_xi < 65.0; rpe_bokeh_xi += 1.0) {\n'
+                + '    if (rpe_bokeh_xi > 2.0 * rpe_bokeh_bound) break;\n'
+                + '    float x = rpe_bokeh_xi - rpe_bokeh_bound;\n'
+                + '    for (float rpe_bokeh_yi = 0.0; rpe_bokeh_yi < 65.0; rpe_bokeh_yi += 1.0) {\n'
+                + '        if (rpe_bokeh_yi > 2.0 * rpe_bokeh_bound) break;\n'
+                + '        float y = rpe_bokeh_yi - rpe_bokeh_bound;\n'
+                + '        vec2 offset = vec2(x, y) / screenSize;\n'
+                + '        float weight = gaussian(vec2(x, y), radius);\n'
+                + '        color += getcolor(uv + offset * intensity) * weight;\n'
+                + '        total += weight;\n'
+                + '    }\n'
+                + '}';
+            return fragment.slice(0, loop.index) + replacement + fragment.slice(end + 1);
+        }
         function prepareGlslEs(fragment, sourceName, es300) {
             fragment = replaceAll(fragment, "\r\n", "\n");
             fragment = stripShaderComments(fragment);
+            fragment = stabilizeFisheye(fragment);
             fragment = fragment.replace(/^\s*#\s*version[^\n]*/gm, "");
             fragment = fragment.replace(/precision\s+(?:lowp|mediump|highp)\s+float\s*;/g, "");
             fragment = fragment.replace(/\blayout\s*\([^)]*\)\s*/g, "");
@@ -2975,6 +3088,8 @@
             // WebGL 2 supports dynamic loops. On WebGL 1 preserve the index
             // type: converting float counters to int breaks valid shader math.
             if (!es300) {
+                fragment = optimizeRainLoop(fragment);
+                fragment = optimizeBokehLoops(fragment);
                 fragment = fragment.replace(/for\s*\(\s*float\s+(\w+)\s*=\s*-\s*([A-Za-z_]\w*)\s*;\s*\1\s*(<=?)\s*\2\s*;\s*(?:\+\+\1|\1\+\+|\1\s*\+=\s*1(?:\.0)?)\s*\)/g,
                     "for (float $1 = -32.0; $1 <= 32.0; $1 += 1.0) if ($1 >= -float($2) && $1 $3 float($2))");
                 fragment = fragment.replace(/for\s*\(\s*float\s+(\w+)\s*=\s*0(?:\.0)?\s*;\s*\1\s*(<=?)\s*([A-Za-z_]\w*)\s*;\s*(?:\+\+\1|\1\+\+|\1\s*\+=\s*1(?:\.0)?)\s*\)/g,
@@ -3024,7 +3139,10 @@
                 fragment = addCopyTexSampleFlip(fragment);
                 fragment = replaceAll(fragment, "texture2D(", "texture(");
             } else {
-                fragment = fragment.replace(/\bin\s+((?:lowp|mediump|highp)\s+)?(vec2|vec3|vec4|float)\s+/g, "varying $1$2 ");
+                // Only fragment interface declarations become varyings.
+                // Function parameters such as foo(in vec2 p, out vec4 c)
+                // retain their direction qualifiers on GLSL ES 1.00.
+                fragment = fragment.replace(/\bin\s+((?:(?:lowp|mediump|highp)\s+)?(?:vec2|vec3|vec4|float)\s+\w+\s*(?:\[[^\]]*\]\s*)?(?:,\s*\w+\s*(?:\[[^\]]*\]\s*)?)*;)/g, "varying $1");
                 if (outName && outName !== "gl_FragColor") fragment = replaceToken(fragment, outName, "gl_FragColor");
                 if (fragment.indexOf("dFdx") >= 0 || fragment.indexOf("dFdy") >= 0) {
                     fragment = "#extension GL_OES_standard_derivatives : enable\n" + fragment;
@@ -3091,6 +3209,7 @@
             if (quadGl !== gl) {
                 quadBuf = null;
                 quadVao = null;
+                quadVaoExt = null;
             }
             quadGl = gl;
             if (!quadBuf) {
@@ -3105,8 +3224,31 @@
                 ]), gl.STATIC_DRAW);
                 gl.bindBuffer(gl.ARRAY_BUFFER, previousBuffer);
             }
-            if (!quadVao && typeof gl.createVertexArray === "function") {
-                try { quadVao = gl.createVertexArray(); } catch (e0) { quadVao = null; }
+            if (!quadVao) {
+                try {
+                    if (isWebGL2(gl)) quadVao = gl.createVertexArray();
+                    else {
+                        quadVaoExt = gl.getExtension("OES_vertex_array_object");
+                        if (quadVaoExt) quadVao = quadVaoExt.createVertexArrayOES();
+                    }
+                } catch (e0) { quadVao = null; }
+                if (quadVao) {
+                    // Keep fixed attributes in our VAO. ARRAY_BUFFER is global,
+                    // so restore it separately from the Runner's current VAO.
+                    var previousVao = gl.getParameter(quadVaoExt ? quadVaoExt.VERTEX_ARRAY_BINDING_OES : gl.VERTEX_ARRAY_BINDING);
+                    var previousArrayBuffer = gl.getParameter(gl.ARRAY_BUFFER_BINDING);
+                    try {
+                        if (quadVaoExt) quadVaoExt.bindVertexArrayOES(quadVao); else gl.bindVertexArray(quadVao);
+                        gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+                        gl.enableVertexAttribArray(0);
+                        gl.enableVertexAttribArray(1);
+                        gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 16, 0);
+                        gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 16, 8);
+                    } finally {
+                        if (quadVaoExt) quadVaoExt.bindVertexArrayOES(previousVao); else gl.bindVertexArray(previousVao);
+                        gl.bindBuffer(gl.ARRAY_BUFFER, previousArrayBuffer);
+                    }
+                }
             }
             return 1;
         }
@@ -3142,18 +3284,21 @@
             var prevTexture0 = gl.getParameter(gl.TEXTURE_BINDING_2D);
             var webgl2 = isWebGL2(gl);
             var prevUnpack = webgl2 ? gl.getParameter(gl.PIXEL_UNPACK_BUFFER_BINDING) : null;
-            var prevDraw = webgl2 ? gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING) : gl.getParameter(gl.FRAMEBUFFER_BINDING);
-            var prevRead = webgl2 ? gl.getParameter(gl.READ_FRAMEBUFFER_BINDING) : prevDraw;
+            var prevDraw = webgl2 ? gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING) : null;
+            var prevRead = webgl2 ? gl.getParameter(gl.READ_FRAMEBUFFER_BINDING) : null;
             var resolve = null;
             try {
                 gl.disable(gl.SCISSOR_TEST);
                 if (webgl2) gl.bindBuffer(gl.PIXEL_UNPACK_BUFFER, null);
-                if (!inputTex) inputTex = gl.createTexture();
+                var createInput = !inputTex;
+                if (createInput) inputTex = gl.createTexture();
                 gl.bindTexture(gl.TEXTURE_2D, inputTex);
-                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+                if (createInput) {
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+                }
                 drainGL(gl);
                 if (texW !== w || texH !== h) {
                     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
@@ -3312,7 +3457,6 @@
 
             var prevProg = gl.getParameter(gl.CURRENT_PROGRAM);
             var prevBuf = gl.getParameter(gl.ARRAY_BUFFER_BINDING);
-            var prevTex = gl.getParameter(gl.TEXTURE_BINDING_2D);
             var prevActive = gl.getParameter(gl.ACTIVE_TEXTURE);
             gl.activeTexture(gl.TEXTURE0);
             var prevTexture0 = gl.getParameter(gl.TEXTURE_BINDING_2D);
@@ -3321,7 +3465,7 @@
             var prevUnpack = null;
             try { if (gl.PIXEL_UNPACK_BUFFER) prevUnpack = gl.getParameter(gl.PIXEL_UNPACK_BUFFER_BINDING); } catch (eU) {}
             var prevVAO = null;
-            try { if (isWebGL2(gl)) prevVAO = gl.getParameter(gl.VERTEX_ARRAY_BINDING); } catch (e0) {}
+            try { if (quadVao) prevVAO = gl.getParameter(quadVaoExt ? quadVaoExt.VERTEX_ARRAY_BINDING_OES : gl.VERTEX_ARRAY_BINDING); } catch (e0) {}
             var prevAttribs = [];
             if (!quadVao) {
                 for (var ai = 0; ai < 2; ai++) prevAttribs.push({
@@ -3343,16 +3487,12 @@
             var prevStencil = gl.isEnabled(gl.STENCIL_TEST);
             var prevDepthMask = gl.getParameter(gl.DEPTH_WRITEMASK);
             var prevColorMask = gl.getParameter(gl.COLOR_WRITEMASK);
-            var prevBlendSrcRGB = gl.getParameter(gl.BLEND_SRC_RGB);
-            var prevBlendDstRGB = gl.getParameter(gl.BLEND_DST_RGB);
-            var prevBlendSrcA = gl.getParameter(gl.BLEND_SRC_ALPHA);
-            var prevBlendDstA = gl.getParameter(gl.BLEND_DST_ALPHA);
-            var prevEqRGB = gl.getParameter(gl.BLEND_EQUATION_RGB);
-            var prevEqA = gl.getParameter(gl.BLEND_EQUATION_ALPHA);
             drainGL(gl);
             lastErr = "";
             try {
-                if (quadVao) gl.bindVertexArray(quadVao);
+                if (quadVao) {
+                    if (quadVaoExt) quadVaoExt.bindVertexArrayOES(quadVao); else gl.bindVertexArray(quadVao);
+                }
                 gl.useProgram(s.prog);
                 gl.viewport(viewX, viewY, viewW, viewH);
                 gl.enable(gl.SCISSOR_TEST);
@@ -3391,23 +3531,28 @@
                     else if (rec.components === 3) gl.uniform3f(rec.location, rec.values[0], rec.values[1], rec.values[2]);
                     else gl.uniform4f(rec.location, rec.values[0], rec.values[1], rec.values[2], rec.values[3]);
                 }
-                gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
-                gl.enableVertexAttribArray(0);
-                gl.enableVertexAttribArray(1);
-                gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 16, 0);
-                gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 16, 8);
+                if (!quadVao) {
+                    gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+                    gl.enableVertexAttribArray(0);
+                    gl.enableVertexAttribArray(1);
+                    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 16, 0);
+                    gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 16, 8);
+                }
                 gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
                 var drawError = gl.getError();
                 if (drawError) throw new Error("WebGL error " + drawError);
-                gl.disableVertexAttribArray(0);
-                gl.disableVertexAttribArray(1);
+                if (!quadVao) {
+                    gl.disableVertexAttribArray(0);
+                    gl.disableVertexAttribArray(1);
+                }
             } catch (eDraw) {
                 lastErr = "shader draw failed " + (eDraw && eDraw.message ? eDraw.message : eDraw);
             }
             try { if (gl.PIXEL_UNPACK_BUFFER) gl.bindBuffer(gl.PIXEL_UNPACK_BUFFER, prevUnpack); } catch (e4) {}
             try {
-                if (quadVao) gl.bindVertexArray(prevVAO);
-                else for (var ai = 0; ai < prevAttribs.length; ai++) {
+                if (quadVao) {
+                    if (quadVaoExt) quadVaoExt.bindVertexArrayOES(prevVAO); else gl.bindVertexArray(prevVAO);
+                } else for (var ai = 0; ai < prevAttribs.length; ai++) {
                     var attr = prevAttribs[ai];
                     if (attr.buffer) {
                         gl.bindBuffer(gl.ARRAY_BUFFER, attr.buffer);
@@ -3421,7 +3566,6 @@
                 gl.bindTexture(gl.TEXTURE_2D, prevTexture0);
                 if (isWebGL2(gl)) gl.bindSampler(0, prevSampler0);
                 gl.activeTexture(prevActive);
-                gl.bindTexture(gl.TEXTURE_2D, prevTex);
                 gl.viewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3]);
                 if (prevScissor) gl.enable(gl.SCISSOR_TEST); else gl.disable(gl.SCISSOR_TEST);
                 gl.scissor(prevScissorBox[0], prevScissorBox[1], prevScissorBox[2], prevScissorBox[3]);
@@ -3431,8 +3575,6 @@
                 if (prevStencil) gl.enable(gl.STENCIL_TEST); else gl.disable(gl.STENCIL_TEST);
                 gl.depthMask(!!prevDepthMask);
                 gl.colorMask(!!prevColorMask[0], !!prevColorMask[1], !!prevColorMask[2], !!prevColorMask[3]);
-                gl.blendEquationSeparate(prevEqRGB, prevEqA);
-                gl.blendFuncSeparate(prevBlendSrcRGB, prevBlendDstRGB, prevBlendSrcA, prevBlendDstA);
             } catch (e3) {}
             return lastErr && lastErr.indexOf("shader draw failed") === 0 ? 0 : 7;
         });
@@ -3454,11 +3596,14 @@
             }
             slots = {};
             if (gl && inputTex) try { gl.deleteTexture(inputTex); } catch (e1) {}
-            if (gl && quadBuf) try { gl.deleteBuffer(quadBuf); } catch (e2) {}
-            if (gl && quadVao) try { gl.deleteVertexArray(quadVao); } catch (e3) {}
+            if (quadGl && quadVao) try {
+                if (quadVaoExt) quadVaoExt.deleteVertexArrayOES(quadVao); else quadGl.deleteVertexArray(quadVao);
+            } catch (e3) {}
+            if (quadGl && quadBuf) try { quadGl.deleteBuffer(quadBuf); } catch (e2) {}
             inputTex = null;
             quadBuf = null;
             quadVao = null;
+            quadVaoExt = null;
             quadGl = null;
             texW = 0;
             texH = 0;
