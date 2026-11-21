@@ -19,13 +19,25 @@
 
 ---
 
-## 4.Phi-RR支持什么格式🤔
+## 4.游玩地址
+目前现在有三个地址
+- [**Github Pages**](https://prr.xthxfm.top/)
+<br>
+
+- [**Cloudflare Pages**](https://dev.xthxfm.top/)
+<br>
+
+- [~~不推荐~~](https://xhdev.xthxfm.top/)
+
+---
+
+## 5.Phi-RR支持什么格式🤔
 
 - 支持`RPEN`(兼容到`2.2.0`) , `OPEC`(旧版PE格式) , `Phigros Official`(官谱)。
 - 支持`extra.json`(内置Shaders基本支持 , 外置Shader半支持 , 半支持视频播放 ; 如果在播放含外置Shader或视频的谱面有bug，那我也无能为力, 因为我力竭了)
 - 支持`line.csv`
 ---
-## 5.支持什么设备💻📱
+## 6.支持什么设备💻📱
 
 | 平台 | 客户端适配 | 浏览器适配 |
 |:---|:---|:---|
@@ -38,7 +50,7 @@
 
 ---
 
-## 6.更新日志📝
+## 7.更新日志📝
 
 ### 2026.11.22
 
